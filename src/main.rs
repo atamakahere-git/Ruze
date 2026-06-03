@@ -9,11 +9,13 @@ use mc_rcon::RconClient;
 use discord_bot::*;
 
 use crate::discord_bot::dc_bot::*;
+use dotenvy::dotenv;
 
 mod discord_bot;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    dotenv().ok();
     let (mc_event_tx, mc_event_rx) = mpsc::channel::<FromMinecraftEvent>(32);
     let (dc_event_tx, mut dc_event_rx) = mpsc::channel::<FromDiscordEvent>(32);
 

@@ -229,7 +229,6 @@ async fn online_players(ctx: Context<'_>) -> Result<(), Error> {
                             .title(server_title)
                             .description(description)
                             .color(0x55FF55)
-                            // Uses clean integer tracking fields
                             .field(
                                 "Players Online",
                                 format!("`{}/{}`", java_data.players.online, java_data.players.max),
@@ -334,11 +333,8 @@ async fn is_owner_or_admin(ctx: Context<'_>) -> Result<bool, Error> {
     }
 
     if let Some(guild_id) = ctx.guild_id() {
-        //  Await the member FIRST. No non-Send references are alive here.
         if let Some(member) = ctx.author_member().await {
-            // Now that all .await calls are finished, we can safely read the cache
             if let Some(guild) = guild_id.to_guild_cached(ctx.serenity_context()) {
-                // Call member_permissions synchronously using the reference
                 let permissions = guild.member_permissions(&member);
 
                 if permissions.contains(serenity::Permissions::ADMINISTRATOR) {
@@ -398,7 +394,6 @@ pub async fn help(ctx: Context<'_>, command_name: Option<String>) -> Result<(), 
 
     let mut embed_fields = Vec::new();
 
-    // Loop through all commands registered in the bot framework
     for command in &ctx.framework().options().commands {
         let description = command
             .description

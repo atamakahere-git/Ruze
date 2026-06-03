@@ -92,8 +92,5 @@ All standard commands utilize the `~` prefix or can be invoked via Slash Command
 
 * `~help` — Displays a beautiful, filtered menu of all available commands.
 * `~ping`  — Checks if the bot is alive and operational.
-* `~online_players`  — Leverages RCON to query the Minecraft server and returns a clean list of all players currently active in-game.
+* `~online_players`  —Query the Minecraft server and returns a clean list of all players currently active in-game.
 * `~start_bridge` — (*Owner/Admin Only*) Binds the active `linemux` log stream to the current Discord channel to initiate the live chat bridge.
-
-```
-```

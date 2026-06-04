@@ -1,7 +1,9 @@
+use dotenvy::dotenv;
 use linemux::MuxedLines;
 use regex::Regex;
-use std::env;
 use std::sync::OnceLock;
+use std::{env, sync::Arc};
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self};
 
 use mc_rcon::RconClient;
@@ -9,7 +11,6 @@ use mc_rcon::RconClient;
 use discord_bot::*;
 
 use crate::discord_bot::dc_bot::*;
-use dotenvy::dotenv;
 
 mod discord_bot;
 
@@ -76,39 +77,44 @@ async fn main() -> std::io::Result<()> {
             }
         }
     });
+    let rcon_server_address = env::var("RCON_SERVER_ADDRESS");
+    let rcon_server_address = if let Ok(rcon_server_address_ok) = rcon_server_address {
+        rcon_server_address_ok
+    } else {
+        println!(
+            "RCON_SERVER_ADDRESS environment variable not detected, defaulting to localhost:25575"
+        );
+        "localhost:25575".to_string()
+    };
+    let Ok(rcon_client) = RconClient::connect(rcon_server_address) else {
+        println!("unable to connect to minecraft rcon server");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "RCON connection failed",
+        ));
+    };
+    let rcon_pass = env::var("RCON_PASSWORD").expect("Expected RCON_PASSWORD in the environment");
+    if let Err(why) = rcon_client.log_in(&rcon_pass) {
+        println!("failed to log in rcon server {why:?}")
+    }
+
+    let shared_rcon = Arc::new(Mutex::new(rcon_client));
+    let rcon_clone = Arc::clone(&shared_rcon);
 
     tokio::spawn(async move {
-        let rcon_server_address = env::var("RCON_SERVER_ADDRESS");
-        let rcon_server_address = if let Ok(rcon_server_address_ok) = rcon_server_address {
-            rcon_server_address_ok
-        } else {
-            println!(
-                "RCON_SERVER_ADDRESS environment variable not detected, defaulting to localhost:25575"
-            );
-            "localhost:25575".to_string()
-        };
-        let Ok(rcon_client) = RconClient::connect(rcon_server_address) else {
-            println!("unable to connect to minecraft rcon server");
-            return;
-        };
-        let rcon_pass =
-            env::var("RCON_PASSWORD").expect("Expected RCON_PASSWORD in the environment");
-        if let Err(why) = rcon_client.log_in(&rcon_pass) {
-            println!("failed to log in rcon server {why:?}")
-        }
-
         while let Some(event) = dc_event_rx.recv().await {
             let formatted_command = format!(
                 r#"tellraw @a {{"text":"[Discord] <{}>: {}", "color":"gold"}}"#,
                 event.username, event.content
             );
-            if let Err(why) = rcon_client.send_command(&formatted_command) {
+            let guard = rcon_clone.lock().await;
+            if let Err(why) = guard.send_command(&formatted_command) {
                 println!("failed to send command to rcon server: {why:?}")
             }
         }
     });
 
-    start_dc_bot(mc_event_rx, dc_event_tx).await;
+    start_dc_bot(mc_event_rx, dc_event_tx, shared_rcon).await;
     Ok(())
 }
 

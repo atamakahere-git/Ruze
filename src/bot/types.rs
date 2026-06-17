@@ -5,23 +5,20 @@ use poise::serenity_prelude as serenity;
 use rust_mc_status::McClient;
 use tokio::sync::{Mutex, RwLock, mpsc::Sender};
 
-use crate::log_parser::{self, MinecraftEvent};
+use crate::log_parser::MinecraftEvent;
 
-/// Event forwarded from Minecraft to Discord.
 #[derive(Debug, Clone)]
 pub struct FromMinecraftEvent {
     pub username: String,
     pub content: String,
 }
 
-/// Event forwarded from Discord to Minecraft.
 #[derive(Debug, Clone)]
 pub struct FromDiscordEvent {
     pub username: String,
     pub content: String,
 }
 
-/// Shared state injected into every bot command and event handler.
 #[derive(Clone)]
 pub struct Data {
     pub dc_event_tx: Sender<FromDiscordEvent>,
@@ -31,38 +28,53 @@ pub struct Data {
     pub mc_server_address: String,
 }
 
-impl From<MinecraftEvent> for FromMinecraftEvent {
-    fn from(event: MinecraftEvent) -> Self {
-        match event {
-            MinecraftEvent::Chat { username, message } => Self {
+impl MinecraftEvent {
+    #[must_use]
+    pub fn into_discord(self) -> Option<FromMinecraftEvent> {
+        match self {
+            Self::Chat { username, message } => Some(FromMinecraftEvent {
                 username,
                 content: message,
-            },
-            MinecraftEvent::Death { system_message } => {
-                let bold_msg = log_parser::bold_first_word(&system_message);
-                Self {
-                    username: "⚰️".to_string(),
-                    content: bold_msg,
-                }
+            }),
+            Self::Join { username } => Some(pad_to_discord(
+                "🟢",
+                &format!("**{username}** joined the game"),
+            )),
+            Self::Leave { username } => Some(pad_to_discord(
+                "🔴",
+                &format!("**{username}** left the game"),
+            )),
+            Self::Disconnect { username, reason } => Some(pad_to_discord(
+                "🔴",
+                &format!("**{username}** lost connection: {reason}"),
+            )),
+            Self::Death { username, message } => {
+                Some(pad_to_discord("⚰️", &format!("**{username}** {message}")))
             }
-            MinecraftEvent::Advancement { system_message } => {
-                let bold_msg = log_parser::bold_first_word(&system_message);
-                Self {
-                    username: "🏆".to_string(),
-                    content: bold_msg,
-                }
+            Self::Advancement {
+                username,
+                advancement,
+            } => Some(pad_to_discord(
+                "🏆",
+                &format!("**{username}** has made the advancement [{advancement}]"),
+            )),
+            Self::Command { username, command } => Some(pad_to_discord(
+                "⌨️",
+                &format!("**{username}** used command: `{command}`"),
+            )),
+            Self::ServerSay { message } => {
+                Some(pad_to_discord("📢", &format!("[Server] {message}")))
             }
-            MinecraftEvent::PlayerJoinLeave {
-                system_message,
-                is_join,
-            } => {
-                let icon = if is_join { "🟢 " } else { "🔴 " };
-                let bold_msg = log_parser::bold_first_word(&system_message);
-                Self {
-                    username: icon.to_string(),
-                    content: bold_msg,
-                }
+            Self::PlayerList { .. } | Self::ServerStart | Self::ServerStop | Self::SaveComplete => {
+                None
             }
         }
+    }
+}
+
+fn pad_to_discord(username: &str, content: &str) -> FromMinecraftEvent {
+    FromMinecraftEvent {
+        username: username.to_owned(),
+        content: content.to_owned(),
     }
 }

@@ -51,7 +51,9 @@ async fn main() -> Result<(), bot::BotError> {
 
         while let Ok(Some(line)) = lines_ok.next_line().await {
             if let Some(event) = log_parser::parse_log_line(line.line()) {
-                let discord_payload = FromMinecraftEvent::from(event);
+                let Some(discord_payload) = event.into_discord() else {
+                    continue;
+                };
                 tracing::info!(
                     username = %discord_payload.username,
                     "mc→dc"

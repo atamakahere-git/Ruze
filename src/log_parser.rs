@@ -2,64 +2,101 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// Events extracted from Minecraft server log lines.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum MinecraftEvent {
     Chat {
         username: String,
         message: String,
     },
-    Death {
-        system_message: String,
+    Join {
+        username: String,
     },
-    PlayerJoinLeave {
-        system_message: String,
-        is_join: bool,
+    Leave {
+        username: String,
+    },
+    Disconnect {
+        username: String,
+        reason: String,
+    },
+    Death {
+        username: String,
+        message: String,
     },
     Advancement {
-        system_message: String,
+        username: String,
+        advancement: String,
     },
+    Command {
+        username: String,
+        command: String,
+    },
+    ServerSay {
+        message: String,
+    },
+    PlayerList {
+        current: u32,
+        max: u32,
+        players: Vec<String>,
+    },
+    ServerStart,
+    ServerStop,
+    SaveComplete,
 }
 
 const DEATH_PATTERNS: &[&str] = &[
     "was slain by",
+    "was shot by",
+    "was blown up by",
     "was smashed by",
     "was impaled by",
-    "was shot by",
     "was pummeled by",
-    "was blown up by",
     "was skewered by",
     "was spit at by",
-    "was struck by lightning",
-    "was frozen to death",
     "was squashed by",
-    "was squished too much",
     "was poked to death",
     "was pricked to death",
-    "was doomed to fall",
-    "fell from a high place",
-    "hit the ground too hard",
-    "fell out of the world",
-    "didn't want to live",
-    "experienced kinetic energy",
-    "drowned",
-    "suffocated in a wall",
-    "starved to death",
+    "was burned to a crisp",
+    "was struck by lightning",
+    "was frozen to death",
+    "struck by lightning",
     "burned to death",
     "went up in flames",
+    "drowned",
+    "starved to death",
+    "suffocated in a wall",
+    "fell from a high place",
+    "fell out of the world",
+    "fell off a ladder",
+    "fell off some vines",
+    "hit the ground too hard",
+    "experienced kinetic energy",
+    "didn't want to live",
+    "was doomed to fall",
     "tried to swim in lava",
     "discovered the floor was lava",
     "withered away",
     "killed by magic",
+    "froze to death",
     "left the confines of this world",
+    "was squished too much",
 ];
 
 const IGNORE_PATTERNS: &[&str] = &[
-    "lost connection:",
+    "[Rcon:",
+    "[AuthMe]",
+    "UUID of player",
     "Logged in with entity id",
     "Saving chunks for level",
-    "Stopping server",
     "Rcon connection from",
+    "[bootstrap]",
+    "[PluginInitializerManager]",
+    "Environment:",
+    "Loaded ",
+    "Starting json RPC",
+    "Json-RPC Management",
+    "Preparing level",
+    "Done (",
+    "was kicked due to",
 ];
 
 fn is_death_message(payload: &str) -> bool {
@@ -70,78 +107,584 @@ fn is_ignorable_system_message(payload: &str) -> bool {
     IGNORE_PATTERNS.iter().any(|p| payload.contains(p))
 }
 
-/// Parse a single Minecraft server log line into a structured event.
-///
-/// Returns `None` for unsupported or irrelevant lines (e.g. chunk saves, rcon connections).
 pub fn parse_log_line(line: &str) -> Option<MinecraftEvent> {
-    static CHAT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    if let Some(event) = try_chat(line) {
+        return Some(event);
+    }
+    if let Some(event) = try_server_say(line) {
+        return Some(event);
+    }
+
+    let payload = extract_system_payload(line)?;
+
+    if is_ignorable_system_message(payload) {
+        tracing::trace!("ignored system line: {payload}");
+        return None;
+    }
+
+    if let Some(event) = try_death(payload) {
+        return Some(event);
+    }
+    if let Some(event) = try_join(payload) {
+        return Some(event);
+    }
+    if let Some(event) = try_leave(payload) {
+        return Some(event);
+    }
+    if let Some(event) = try_disconnect(payload) {
+        return Some(event);
+    }
+    if let Some(event) = try_command(payload) {
+        return Some(event);
+    }
+    if let Some(event) = try_advancement(payload) {
+        return Some(event);
+    }
+    if let Some(event) = try_player_list(payload) {
+        return Some(event);
+    }
+    if let Some(event) = try_server_start(payload) {
+        return Some(event);
+    }
+    if let Some(event) = try_server_stop(payload) {
+        return Some(event);
+    }
+    if let Some(event) = try_save_complete(payload) {
+        return Some(event);
+    }
+
+    None
+}
+
+fn try_chat(line: &str) -> Option<MinecraftEvent> {
+    static REGEX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r"^\[\d{2}:\d{2}:\d{2}\]\s\[[^\]]+/INFO\]:\s(?:\[Not Secure\]\s)?<(?P<username>[a-zA-Z0-9_]{3,16})>\s(?P<message>.+)$",
         )
         .expect("valid static chat regex pattern")
     });
 
-    static SYSTEM_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    let captures = REGEX.captures(line)?;
+    let username = captures.name("username")?.as_str().to_owned();
+    let message = captures.name("message")?.as_str().to_owned();
+    tracing::debug!(%username, "chat event parsed");
+    Some(MinecraftEvent::Chat { username, message })
+}
+
+fn try_server_say(line: &str) -> Option<MinecraftEvent> {
+    static REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^\[\d{2}:\d{2}:\d{2}\]\s\[[^\]]+/INFO\]:\s(?:\[Not Secure\]\s)?\[Server\]\s(?P<message>.+)$",
+        )
+        .expect("valid static server-say regex pattern")
+    });
+
+    let captures = REGEX.captures(line)?;
+    let message = captures.name("message")?.as_str().to_owned();
+    tracing::debug!("server-say event parsed");
+    Some(MinecraftEvent::ServerSay { message })
+}
+
+fn extract_system_payload(line: &str) -> Option<&str> {
+    static REGEX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^\[\d{2}:\d{2}:\d{2}\]\s\[[^\]]+/INFO\]:\s(?P<payload>.+)$")
             .expect("valid static system regex pattern")
     });
 
-    if let Some(captures) = CHAT_REGEX.captures(line) {
-        let username = captures.name("username")?.as_str().to_string();
-        let message = captures.name("message")?.as_str().to_string();
-        tracing::debug!(username = %username, "chat event parsed");
-        return Some(MinecraftEvent::Chat { username, message });
-    }
-
-    if let Some(captures) = SYSTEM_REGEX.captures(line) {
-        let payload = captures.name("payload")?.as_str();
-
-        if payload.contains("joined the game") {
-            tracing::info!(payload = %payload, "player joined");
-            return Some(MinecraftEvent::PlayerJoinLeave {
-                system_message: payload.to_string(),
-                is_join: true,
-            });
-        }
-
-        if payload.contains("left the game") {
-            tracing::info!(payload = %payload, "player left");
-            return Some(MinecraftEvent::PlayerJoinLeave {
-                system_message: payload.to_string(),
-                is_join: false,
-            });
-        }
-
-        if is_ignorable_system_message(payload) {
-            tracing::trace!("ignored system line");
-            return None;
-        }
-
-        if payload.contains("has made the advancement")
-            || payload.contains("has completed the challenge")
-        {
-            tracing::info!(payload = %payload, "advancement earned");
-            return Some(MinecraftEvent::Advancement {
-                system_message: payload.to_string(),
-            });
-        }
-
-        if is_death_message(payload) {
-            tracing::info!(payload = %payload, "death event");
-            return Some(MinecraftEvent::Death {
-                system_message: payload.to_string(),
-            });
-        }
-    }
-
-    None
+    let captures = REGEX.captures(line)?;
+    captures.name("payload").map(|m| m.as_str())
 }
 
-/// Wraps the first word of a message in markdown bold (`**word**`).
-pub fn bold_first_word(text: &str) -> String {
-    if let Some((first_word, rest)) = text.split_once(' ') {
-        format!("**{first_word}** {rest}")
+fn try_death(payload: &str) -> Option<MinecraftEvent> {
+    static EXTRACT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?P<username>[a-zA-Z0-9_]{3,16})\s(?P<message>.+)$")
+            .expect("valid static death-extract regex pattern")
+    });
+
+    if !is_death_message(payload) {
+        return None;
+    }
+
+    let captures = EXTRACT.captures(payload)?;
+    let username = captures.name("username")?.as_str().to_owned();
+    let message = captures.name("message")?.as_str().to_owned();
+    tracing::info!(%username, "death event parsed");
+    Some(MinecraftEvent::Death { username, message })
+}
+
+fn try_join(payload: &str) -> Option<MinecraftEvent> {
+    static REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?P<username>[a-zA-Z0-9_]{3,16})\sjoined the game$")
+            .expect("valid static join regex pattern")
+    });
+
+    let captures = REGEX.captures(payload)?;
+    let username = captures.name("username")?.as_str().to_owned();
+    tracing::info!(%username, "player joined");
+    Some(MinecraftEvent::Join { username })
+}
+
+fn try_leave(payload: &str) -> Option<MinecraftEvent> {
+    static REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?P<username>[a-zA-Z0-9_]{3,16})\sleft the game$")
+            .expect("valid static leave regex pattern")
+    });
+
+    let captures = REGEX.captures(payload)?;
+    let username = captures.name("username")?.as_str().to_owned();
+    tracing::info!(%username, "player left");
+    Some(MinecraftEvent::Leave { username })
+}
+
+fn try_disconnect(payload: &str) -> Option<MinecraftEvent> {
+    static REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?P<username>[a-zA-Z0-9_]{3,16})\slost connection:\s(?P<reason>.+)$")
+            .expect("valid static disconnect regex pattern")
+    });
+
+    let captures = REGEX.captures(payload)?;
+    let username = captures.name("username")?.as_str().to_owned();
+    let reason = captures.name("reason")?.as_str().to_owned();
+    tracing::info!(%username, %reason, "player disconnected");
+    Some(MinecraftEvent::Disconnect { username, reason })
+}
+
+fn try_command(payload: &str) -> Option<MinecraftEvent> {
+    static REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^(?P<username>[a-zA-Z0-9_]{3,16})\sissued server command:\s(?P<command>/[^\n]+)$",
+        )
+        .expect("valid static command regex pattern")
+    });
+
+    let captures = REGEX.captures(payload)?;
+    let username = captures.name("username")?.as_str().to_owned();
+    if username == "SERVER" {
+        tracing::debug!("ignored SERVER command");
+        return None;
+    }
+    let command = captures.name("command")?.as_str().to_owned();
+    tracing::info!(%username, %command, "command event parsed");
+    Some(MinecraftEvent::Command { username, command })
+}
+
+fn try_advancement(payload: &str) -> Option<MinecraftEvent> {
+    static REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^(?P<username>[a-zA-Z0-9_]{3,16})\shas (?:made the advancement|completed the challenge)\s\[(?P<advancement>.+)\]$",
+        )
+        .expect("valid static advancement regex pattern")
+    });
+
+    let captures = REGEX.captures(payload)?;
+    let username = captures.name("username")?.as_str().to_owned();
+    let advancement = captures.name("advancement")?.as_str().to_owned();
+    tracing::info!(%username, %advancement, "advancement earned");
+    Some(MinecraftEvent::Advancement {
+        username,
+        advancement,
+    })
+}
+
+fn try_player_list(payload: &str) -> Option<MinecraftEvent> {
+    static REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^There are (?P<current>\d+) of a max of (?P<max>\d+) players online:?\s*(?P<players>.+)?$",
+        )
+        .expect("valid static player-list regex pattern")
+    });
+
+    let captures = REGEX.captures(payload)?;
+    let current: u32 = captures.name("current")?.as_str().parse().ok()?;
+    let max: u32 = captures.name("max")?.as_str().parse().ok()?;
+    let players = captures
+        .name("players")
+        .map(|m| {
+            m.as_str()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    tracing::debug!(current, max, ?players, "player list event");
+    Some(MinecraftEvent::PlayerList {
+        current,
+        max,
+        players,
+    })
+}
+
+fn try_server_start(payload: &str) -> Option<MinecraftEvent> {
+    if payload.starts_with("Starting minecraft server version") {
+        tracing::info!("server starting detected");
+        Some(MinecraftEvent::ServerStart)
     } else {
-        format!("**{text}**")
+        None
+    }
+}
+
+fn try_server_stop(payload: &str) -> Option<MinecraftEvent> {
+    if payload == "Stopping the server" || payload == "Stopping server" {
+        tracing::warn!("server stopping detected");
+        Some(MinecraftEvent::ServerStop)
+    } else {
+        None
+    }
+}
+
+fn try_save_complete(payload: &str) -> Option<MinecraftEvent> {
+    if payload == "Saved the game" {
+        tracing::debug!("world save detected");
+        Some(MinecraftEvent::SaveComplete)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_chat_message() {
+        let line = r"[12:11:32] [Async Chat Thread - #3/INFO]: [Not Secure] <karambit> I will put them inbox";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Chat {
+                username: "karambit".into(),
+                message: "I will put them inbox".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_chat_without_not_secure() {
+        let line = r"[12:11:32] [Async Chat Thread - #3/INFO]: <karambit> hello world";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Chat {
+                username: "karambit".into(),
+                message: "hello world".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_server_say() {
+        let line = r"[10:12:46] [Server thread/INFO]: [Not Secure] [Server] playing still?";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::ServerSay {
+                message: "playing still?".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_join() {
+        let line = r"[02:20:03] [Server thread/INFO]: Vodka_not_Rum joined the game";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Join {
+                username: "Vodka_not_Rum".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_leave() {
+        let line = r"[02:19:55] [Server thread/INFO]: Vodka_not_Rum left the game";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Leave {
+                username: "Vodka_not_Rum".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_disconnect() {
+        let line = r"[00:52:15] [Server thread/INFO]: atamaka lost connection: Timed out";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Disconnect {
+                username: "atamaka".into(),
+                reason: "Timed out".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_disconnect_multiple_ips() {
+        let line = r"[12:00:01] [Server thread/INFO]: test_user lost connection: Login timeout exceeded, you have been kicked from the server, please try again!";
+        let event = parse_log_line(line).unwrap();
+        assert!(matches!(event, MinecraftEvent::Disconnect { .. }));
+        if let MinecraftEvent::Disconnect { username, reason } = event {
+            assert_eq!(username, "test_user");
+            assert!(reason.contains("Login timeout"));
+        }
+    }
+
+    #[test]
+    fn parse_disconnect_same_username() {
+        let line = r"[12:00:01] [Server thread/INFO]: test_user lost connection: The same username is already playing on the server!";
+        let event = parse_log_line(line).unwrap();
+        assert!(matches!(event, MinecraftEvent::Disconnect { .. }));
+    }
+
+    #[test]
+    fn parse_death_slain() {
+        let line = r"[02:22:16] [Server thread/INFO]: tess was slain by Vodka_not_Rum";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Death {
+                username: "tess".into(),
+                message: "was slain by Vodka_not_Rum".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_death_kinetic_energy() {
+        let line = r"[04:42:23] [Server thread/INFO]: karambit experienced kinetic energy while trying to escape Endermite";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Death {
+                username: "karambit".into(),
+                message: "experienced kinetic energy while trying to escape Endermite".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_death_froze() {
+        let line = r"[14:13:56] [Server thread/INFO]: karambit froze to death";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Death {
+                username: "karambit".into(),
+                message: "froze to death".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_death_burned_to_crisp() {
+        let line = r"[02:46:06] [Server thread/INFO]: Vodka_not_Rum was burned to a crisp while fighting Nami";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Death {
+                username: "Vodka_not_Rum".into(),
+                message: "was burned to a crisp while fighting Nami".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_death_drowned() {
+        let line = r"[12:00:01] [Server thread/INFO]: TestPlayer drowned";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Death {
+                username: "TestPlayer".into(),
+                message: "drowned".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_death_fell_from_high_place() {
+        let line = r"[12:00:01] [Server thread/INFO]: TestPlayer fell from a high place";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Death {
+                username: "TestPlayer".into(),
+                message: "fell from a high place".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_command() {
+        let line = r"[12:00:01] [Server thread/INFO]: atamaka issued server command: /tp nava39";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Command {
+                username: "atamaka".into(),
+                command: "/tp nava39".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_advancement() {
+        let line =
+            r"[12:00:01] [Server thread/INFO]: TestPlayer has made the advancement [Stone Age]";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Advancement {
+                username: "TestPlayer".into(),
+                advancement: "Stone Age".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_advancement_challenge() {
+        let line = r"[12:00:01] [Server thread/INFO]: TestPlayer has completed the challenge [Cover Me in Debris]";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::Advancement {
+                username: "TestPlayer".into(),
+                advancement: "Cover Me in Debris".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_player_list() {
+        let line = r"[12:00:01] [Server thread/INFO]: There are 2 of a max of 10 players online: atamaka, nava39";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::PlayerList {
+                current: 2,
+                max: 10,
+                players: vec!["atamaka".into(), "nava39".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_player_list_empty() {
+        let line = r"[12:00:01] [Server thread/INFO]: There are 0 of a max of 10 players online:";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::PlayerList {
+                current: 0,
+                max: 10,
+                players: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_player_list_empty_no_colon() {
+        let line = r"[12:00:01] [Server thread/INFO]: There are 0 of a max of 10 players online";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(
+            event,
+            MinecraftEvent::PlayerList {
+                current: 0,
+                max: 10,
+                players: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_server_start() {
+        let line = r"[12:58:05] [Server thread/INFO]: Starting minecraft server version 1.21.11";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(event, MinecraftEvent::ServerStart);
+    }
+
+    #[test]
+    fn parse_server_stop() {
+        let line = r"[19:55:43] [Server thread/INFO]: Stopping the server";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(event, MinecraftEvent::ServerStop);
+    }
+
+    #[test]
+    fn parse_server_stop_variant() {
+        let line = r"[19:55:44] [Server thread/INFO]: Stopping server";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(event, MinecraftEvent::ServerStop);
+    }
+
+    #[test]
+    fn parse_save_complete() {
+        let line = r"[12:00:01] [Server thread/INFO]: Saved the game";
+        let event = parse_log_line(line).unwrap();
+        assert_eq!(event, MinecraftEvent::SaveComplete);
+    }
+
+    #[test]
+    fn ignore_rcon_command() {
+        let line = r"[10:17:33] [Server thread/INFO]: [Rcon: Saved the game]";
+        assert!(parse_log_line(line).is_none());
+    }
+
+    #[test]
+    fn ignore_bootstrap() {
+        let line = r"[12:57:38] [ServerMain/INFO]: [bootstrap] Running Java 25 on Linux 7.0.4+deb13-amd64 (amd64)";
+        assert!(parse_log_line(line).is_none());
+    }
+
+    #[test]
+    fn ignore_plugins() {
+        let line =
+            r"[12:57:53] [ServerMain/INFO]: [PluginInitializerManager] Initialized 7 plugins";
+        assert!(parse_log_line(line).is_none());
+    }
+
+    #[test]
+    fn ignore_uuid_lookup() {
+        let line = r"[02:20:02] [User Authenticator #206/INFO]: UUID of player Vodka_not_Rum is 9e78961d-0a81-3dd7-b80f-d1abf718d3e8";
+        assert!(parse_log_line(line).is_none());
+    }
+
+    #[test]
+    fn ignore_entity_login() {
+        let line = r"[02:20:03] [Server thread/INFO]: Vodka_not_Rum[/[2401:9640:...]:9570] logged in with entity id 1624273 at ([world_nether]462.2, 128.0, 275.2)";
+        assert!(parse_log_line(line).is_none());
+    }
+
+    #[test]
+    fn ignore_saving_chunks() {
+        let line = r"[Server thread/INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld";
+        assert!(parse_log_line(line).is_none());
+    }
+
+    #[test]
+    fn ignore_done_startup() {
+        let line = "[12:58:16] [Server thread/INFO]: Done (39.180s)! For help, type \"help\"";
+        assert!(parse_log_line(line).is_none());
+    }
+
+    #[test]
+    fn ignore_warning_moved_wrongly() {
+        let line = r"[00:00:58] [Server thread/WARN]: atamaka moved wrongly!";
+        assert!(parse_log_line(line).is_none());
+    }
+
+    #[test]
+    fn ignore_server_command_say() {
+        let line = r"[Server thread/INFO]: SERVER issued server command: /say hi";
+        assert!(parse_log_line(line).is_none());
+    }
+
+    #[test]
+    fn ignore_arbitrary_line() {
+        assert!(parse_log_line("garbage").is_none());
     }
 }

@@ -5,6 +5,14 @@ use poise::serenity_prelude as serenity;
 
 use super::{BotError, Context};
 
+fn url_to_hostport(url: &url::Url) -> String {
+    let host = url.host_str().unwrap_or("localhost");
+    match url.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_owned(),
+    }
+}
+
 fn ping_help() -> String {
     String::from("Use this to check if I'm alive!")
 }
@@ -38,7 +46,7 @@ pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
         .inspect_err(|e| tracing::warn!("failed to defer interaction: {e}"))
         .ok();
 
-    let query_address = &ctx.data().mc_server_address;
+    let query_address = url_to_hostport(&ctx.data().mc_server_address);
 
     tracing::info!(
         user = %ctx.author().name,
@@ -73,7 +81,7 @@ pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
     if let Ok(status) = ctx
         .data()
         .mc_status_client
-        .ping(query_address, rust_mc_status::ServerEdition::Java)
+        .ping(&query_address, rust_mc_status::ServerEdition::Java)
         .await
     {
         latency_ms = status.latency;
@@ -138,13 +146,19 @@ pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
 pub async fn start_bridge(ctx: Context<'_>) -> Result<(), BotError> {
     let current_channel_id = ctx.channel_id();
 
-    {
+    let channels_to_save = {
         let shared_list = &ctx.data().target_channel_id_list;
         let mut lock = shared_list.write().await;
         if !lock.contains(&current_channel_id) {
             lock.push(current_channel_id);
         }
-    }
+        lock.iter().map(|c| c.get()).collect::<Vec<_>>()
+    };
+
+    crate::storage::save_channels(channels_to_save)
+        .await
+        .inspect_err(|e| tracing::error!(%e, "failed to persist bridge state"))
+        .ok();
 
     tracing::info!(
         user = %ctx.author().name,
@@ -165,12 +179,21 @@ pub async fn stop_bridge(ctx: Context<'_>) -> Result<(), BotError> {
     let current_channel_id = ctx.channel_id();
     let shared_list = &ctx.data().target_channel_id_list;
 
-    let mut lock = shared_list.write().await;
-    let len_before = lock.len();
-    lock.retain(|&id| id != current_channel_id);
-    let was_bridged = lock.len() < len_before;
+    let (was_bridged, channels_to_save) = {
+        let mut lock = shared_list.write().await;
+        let len_before = lock.len();
+        lock.retain(|&id| id != current_channel_id);
+        (
+            lock.len() < len_before,
+            lock.iter().map(|c| c.get()).collect::<Vec<_>>(),
+        )
+    };
 
     if was_bridged {
+        crate::storage::save_channels(channels_to_save)
+            .await
+            .inspect_err(|e| tracing::error!(%e, "failed to persist bridge state"))
+            .ok();
         tracing::info!(
             user = %ctx.author().name,
             channel = %current_channel_id,

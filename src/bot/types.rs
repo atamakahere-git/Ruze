@@ -19,13 +19,20 @@ pub struct FromDiscordEvent {
     pub content: String,
 }
 
+/// Bot configuration fields that are consumed once during startup.
+pub struct BotParams {
+    pub token: String,
+    pub owner_id: u64,
+    pub guild_id: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct Data {
     pub dc_event_tx: Sender<FromDiscordEvent>,
     pub mc_status_client: McClient,
     pub target_channel_id_list: Arc<RwLock<Vec<serenity::ChannelId>>>,
     pub rcon_client: Arc<Mutex<RconClient>>,
-    pub mc_server_address: String,
+    pub mc_server_address: url::Url,
 }
 
 impl MinecraftEvent {
@@ -36,44 +43,45 @@ impl MinecraftEvent {
                 username,
                 content: message,
             }),
-            Self::Join { username } => Some(pad_to_discord(
+            Self::Join { username } => Some(into_bridge_event(
                 "🟢",
                 &format!("**{username}** joined the game"),
             )),
-            Self::Leave { username } => Some(pad_to_discord(
+            Self::Leave { username } => Some(into_bridge_event(
                 "🔴",
                 &format!("**{username}** left the game"),
             )),
-            Self::Disconnect { username, reason } => Some(pad_to_discord(
+            Self::Disconnect { username, reason } => Some(into_bridge_event(
                 "🔴",
                 &format!("**{username}** lost connection: {reason}"),
             )),
-            Self::Death { username, message } => {
-                Some(pad_to_discord("⚰️", &format!("**{username}** {message}")))
-            }
+            Self::Death { username, message } => Some(into_bridge_event(
+                "⚰️",
+                &format!("**{username}** {message}"),
+            )),
             Self::Advancement {
                 username,
                 advancement,
-            } => Some(pad_to_discord(
+            } => Some(into_bridge_event(
                 "🏆",
                 &format!("**{username}** has made the advancement [{advancement}]"),
             )),
-            Self::Command { username, command } => Some(pad_to_discord(
+            Self::Command { username, command } => Some(into_bridge_event(
                 "⌨️",
                 &format!("**{username}** used command: `{command}`"),
             )),
             Self::ServerSay { message } => {
-                Some(pad_to_discord("📢", &format!("[Server] {message}")))
+                Some(into_bridge_event("📢", &format!("[Server] {message}")))
             }
-            Self::ServerStart => Some(pad_to_discord("🚀", "Server started!")),
-            Self::ServerStop => Some(pad_to_discord("🛑", "Server stopped!")),
-            Self::SaveComplete => Some(pad_to_discord("💾", "World saved!")),
+            Self::ServerStart => Some(into_bridge_event("🚀", "Server started!")),
+            Self::ServerStop => Some(into_bridge_event("🛑", "Server stopped!")),
+            Self::SaveComplete => Some(into_bridge_event("💾", "World saved!")),
             Self::PlayerList { .. } => None,
         }
     }
 }
 
-fn pad_to_discord(username: &str, content: &str) -> FromMinecraftEvent {
+fn into_bridge_event(username: &str, content: &str) -> FromMinecraftEvent {
     FromMinecraftEvent {
         username: username.to_owned(),
         content: content.to_owned(),

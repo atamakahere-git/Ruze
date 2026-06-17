@@ -4,12 +4,13 @@ use linemux::MuxedLines;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use bot::types::{FromDiscordEvent, FromMinecraftEvent};
+use bot::types::{BotParams, FromDiscordEvent, FromMinecraftEvent};
 
 mod bot;
 mod consts;
 mod log_parser;
 mod rcon;
+mod storage;
 
 #[tokio::main]
 async fn main() -> Result<(), bot::BotError> {
@@ -73,9 +74,24 @@ async fn main() -> Result<(), bot::BotError> {
         tracing::info!("Discord → Minecraft relay started");
 
         while let Some(event) = dc_event_rx.recv().await {
+            let safe_username: String = event
+                .username
+                .chars()
+                .map(|c| match c {
+                    '"' | '\\' => ' ',
+                    _ => c,
+                })
+                .collect();
+            let safe_content: String = event
+                .content
+                .chars()
+                .map(|c| match c {
+                    '"' | '\\' => ' ',
+                    _ => c,
+                })
+                .collect();
             let formatted_command = format!(
-                r#"tellraw @a {{"text":"[Discord] <{}>: {}", "color":"gold"}}"#,
-                event.username, event.content
+                r#"tellraw @a {{"text":"[Discord] <{safe_username}>: {safe_content}", "color":"gold"}}"#
             );
             let guard = rcon_clone.lock().await;
             if let Err(why) = guard.send_command(&formatted_command) {
@@ -95,11 +111,15 @@ async fn main() -> Result<(), bot::BotError> {
 
     tracing::info!("bridge is now running");
 
+    let bot_params = BotParams {
+        token: config.discord.token,
+        owner_id: config.bot.owner_id,
+        guild_id: config.bot.guild_id,
+    };
+
     bot::handler::start_bot(
-        config.discord.token,
-        config.bot.owner_id,
-        config.bot.guild_id,
-        config.minecraft.server_address,
+        bot_params,
+        parse_mc_address(&config.minecraft.server_address),
         mc_event_rx,
         dc_event_tx,
         shared_rcon,
@@ -107,4 +127,18 @@ async fn main() -> Result<(), bot::BotError> {
     .await?;
 
     Ok(())
+}
+
+fn parse_mc_address(raw: &str) -> url::Url {
+    if raw.contains("://") {
+        raw.parse().unwrap_or_else(|e| {
+            tracing::error!(%raw, %e, "invalid minecraft server URL, using default");
+            "mc://localhost:25565".parse().expect("hardcoded URL")
+        })
+    } else {
+        format!("mc://{raw}").parse().unwrap_or_else(|e| {
+            tracing::error!(%raw, %e, "invalid minecraft server address, using default");
+            "mc://localhost:25565".parse().expect("hardcoded URL")
+        })
+    }
 }

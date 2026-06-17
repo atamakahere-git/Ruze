@@ -270,6 +270,11 @@ fn xdg_config_home() -> PathBuf {
     std::env::var("XDG_CONFIG_HOME").map_or_else(|_| home_dir().join(".config"), PathBuf::from)
 }
 
+fn xdg_data_home() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
+        .map_or_else(|_| home_dir().join(".local").join("share"), PathBuf::from)
+}
+
 fn xdg_config_path() -> String {
     xdg_config_home()
         .join("ruze.toml")
@@ -279,4 +284,8 @@ fn xdg_config_path() -> String {
 
 fn home_ruze_path() -> String {
     home_dir().join(".ruze.toml").to_string_lossy().to_string()
+}
+
+pub fn bridge_state_path() -> PathBuf {
+    xdg_data_home().join("ruze").join("bridge_state.toml")
 }

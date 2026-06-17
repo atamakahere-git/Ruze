@@ -11,18 +11,17 @@ use tokio::sync::{
 
 use super::BotError;
 use super::commands;
-use super::types::{Data, FromDiscordEvent, FromMinecraftEvent};
+use super::types::{BotParams, Data, FromDiscordEvent, FromMinecraftEvent};
 
 /// Start the Discord bot, register commands, and begin dispatching events.
 ///
 /// # Errors
 ///
 /// Returns `BotError` if the client fails to build or the bot fails to start.
+#[allow(clippy::too_many_lines)]
 pub async fn start_bot(
-    token: String,
-    owner_id: u64,
-    guild_id: Option<u64>,
-    mc_server_address: String,
+    params: BotParams,
+    mc_server_address: url::Url,
     mut mc_event_rx: Receiver<FromMinecraftEvent>,
     dc_event_tx: Sender<FromDiscordEvent>,
     rcon_client: Arc<Mutex<RconClient>>,
@@ -30,7 +29,11 @@ pub async fn start_bot(
     let intents =
         serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT;
 
-    let bridge_channel_list = Arc::new(RwLock::new(Vec::new()));
+    let initial_channels = crate::storage::load_channels()
+        .await
+        .inspect_err(|e| tracing::warn!(%e, "failed to load bridge state, starting fresh"))
+        .unwrap_or_default();
+    let bridge_channel_list = Arc::new(RwLock::new(initial_channels));
     let bridge_channel_list_clone = Arc::clone(&bridge_channel_list);
 
     let mc_status_client = McClient::new()
@@ -38,7 +41,9 @@ pub async fn start_bot(
         .with_max_parallel(10);
 
     let mut owners = HashSet::new();
-    owners.insert(serenity::UserId::new(owner_id));
+    owners.insert(serenity::UserId::new(params.owner_id));
+
+    let guild_id = params.guild_id;
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -87,7 +92,7 @@ pub async fn start_bot(
         })
         .build();
 
-    let client_builder = serenity::ClientBuilder::new(token, intents).framework(framework);
+    let client_builder = serenity::ClientBuilder::new(params.token, intents).framework(framework);
     let mut client = client_builder.await?;
     let cache_http = Arc::clone(&client.http);
 

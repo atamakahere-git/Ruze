@@ -11,13 +11,13 @@ pub mod types;
 #[derive(Debug, thiserror::Error)]
 pub enum BotError {
     #[error("discord error: {0}")]
-    Serenity(Box<serenity::Error>),
+    Serenity(Box<poise::serenity_prelude::Error>),
     #[error("{0}")]
     Io(#[from] std::io::Error),
 }
 
-impl From<serenity::Error> for BotError {
-    fn from(e: serenity::Error) -> Self {
+impl From<poise::serenity_prelude::Error> for BotError {
+    fn from(e: poise::serenity_prelude::Error) -> Self {
         Self::Serenity(Box::new(e))
     }
 }

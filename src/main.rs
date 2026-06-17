@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use dotenvy::dotenv;
 use linemux::MuxedLines;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -15,7 +14,6 @@ mod rcon;
 #[tokio::main]
 async fn main() -> Result<(), bot::BotError> {
     tracing_subscriber::fmt::init();
-    dotenv().ok();
 
     let config = consts::Config::load().map_err(|e| {
         tracing::error!("Configuration error: {e}");

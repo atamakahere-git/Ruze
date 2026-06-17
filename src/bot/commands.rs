@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Write;
 
 use base64::Engine;
@@ -5,11 +6,11 @@ use poise::serenity_prelude as serenity;
 
 use super::{BotError, Context};
 
-fn url_to_hostport(url: &url::Url) -> String {
+fn url_to_hostport(url: &url::Url) -> Cow<'_, str> {
     let host = url.host_str().unwrap_or("localhost");
     match url.port() {
-        Some(p) => format!("{host}:{p}"),
-        None => host.to_owned(),
+        Some(p) => Cow::Owned(format!("{host}:{p}")),
+        None => Cow::Borrowed(host),
     }
 }
 
@@ -31,6 +32,26 @@ pub async fn ping(ctx: Context<'_>) -> Result<(), BotError> {
     tracing::info!(user = %ctx.author().name, "command /ping executed");
     ctx.say("UwU Helloo!").await?;
     Ok(())
+}
+
+fn parse_player_list(response: &str) -> Vec<&str> {
+    let names_blob = response
+        .split_once("online:")
+        .map(|(_, rest)| rest)
+        .or_else(|| {
+            response.find("online").map(|pos| {
+                response[pos + 6..]
+                    .trim_start()
+                    .trim_start_matches(&[':', '.', ' '][..])
+            })
+        });
+
+    names_blob.map_or_else(Vec::new, |blob| {
+        blob.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect()
+    })
 }
 
 /// Get list of online players in game right now.
@@ -61,76 +82,78 @@ pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
     };
     drop(rcon_guard);
 
-    let parsed_players: Vec<String> =
-        if let Some((_, names_blob)) = rcon_response.split_once("online:") {
-            names_blob
-                .split(',')
-                .map(|name| name.trim().to_string())
-                .filter(|name| !name.is_empty())
-                .collect()
-        } else {
-            Vec::new()
-        };
+    let parsed_players = parse_player_list(&rcon_response);
 
-    let mut motd = "Minecraft Server Status".to_string();
-    let mut latency_ms = 0.0;
-    let mut favicon_b64: Option<String> = None;
-    let mut total_players_online = 0;
-    let mut max_players_limit = 20;
+    let (motd, latency_ms, favicon_b64, total_players_online, max_players_limit) = {
+        let mut motd = String::from("Minecraft Server Status");
+        let mut latency_ms = 0.0;
+        let mut favicon_b64: Option<String> = None;
+        let mut total_players_online = 0;
+        let mut max_players_limit = 20;
 
-    if let Ok(status) = ctx
-        .data()
-        .mc_status_client
-        .ping(&query_address, rust_mc_status::ServerEdition::Java)
-        .await
-    {
-        latency_ms = status.latency;
-        if let rust_mc_status::ServerData::Java(java_data) = status.data {
-            motd = java_data.description;
-            favicon_b64 = java_data.favicon;
-            total_players_online = java_data.players.online;
-            max_players_limit = java_data.players.max;
+        if let Ok(status) = ctx
+            .data()
+            .mc_status_client
+            .ping(&query_address, rust_mc_status::ServerEdition::Java)
+            .await
+        {
+            latency_ms = status.latency;
+            if let rust_mc_status::ServerData::Java(java_data) = status.data {
+                motd = java_data.description;
+                favicon_b64 = java_data.favicon;
+                total_players_online = java_data.players.online;
+                max_players_limit = java_data.players.max;
+            }
         }
-    }
+        (
+            motd,
+            latency_ms,
+            favicon_b64,
+            total_players_online,
+            max_players_limit,
+        )
+    };
 
-    let mut embed_description = String::new();
-    if parsed_players.is_empty() {
+    let embed_description = if parsed_players.is_empty() {
         if total_players_online > 0 {
-            embed_description
-                .push_str("⚠️ *Failed to safely map names via RCON, but players are active.*");
+            String::from("⚠️ *Failed to safely map names via RCON, but players are active.*")
         } else {
-            embed_description.push_str("*No players are currently online.*");
+            String::from("*No players are currently online.*")
         }
     } else {
-        embed_description.push_str("👥 **Current Online Players:**\n\n");
+        let mut desc = String::from("👥 **Current Online Players:**\n\n");
         for (index, player_name) in parsed_players.iter().enumerate() {
-            let _ = writeln!(embed_description, "{}. `{player_name}`", index + 1);
+            let _ = writeln!(desc, "{}. `{player_name}`", index + 1);
         }
-    }
+        desc
+    };
 
-    let mut embed = serenity::CreateEmbed::new()
-        .title(format!("🎮 {motd}"))
-        .description(embed_description)
-        .color(0x9b5_9b6)
-        .field(
-            "Players Online",
-            format!("`{total_players_online}/{max_players_limit}`"),
-            true,
-        )
-        .field("Latency", format!("`{latency_ms:.1}ms`"), true);
+    let (reply, embed) = {
+        let mut embed = serenity::CreateEmbed::new()
+            .title(format!("🎮 {motd}"))
+            .description(embed_description)
+            .color(0x9b5_9b6)
+            .field(
+                "Players Online",
+                format!("`{total_players_online}/{max_players_limit}`"),
+                true,
+            )
+            .field("Latency", format!("`{latency_ms:.1}ms`"), true);
 
-    let mut reply = poise::CreateReply::default();
+        let mut reply = poise::CreateReply::default();
 
-    if let Some(base64_data) = favicon_b64 {
-        let clean_b64 = base64_data
-            .strip_prefix("data:image/png;base64,")
-            .unwrap_or(&base64_data);
-        if let Ok(image_bytes) = base64::engine::general_purpose::STANDARD.decode(clean_b64) {
-            let attachment = serenity::CreateAttachment::bytes(image_bytes, "server_icon.png");
-            reply = reply.attachment(attachment);
-            embed = embed.thumbnail("attachment://server_icon.png");
+        if let Some(base64_data) = favicon_b64 {
+            let clean_b64 = base64_data
+                .strip_prefix("data:image/png;base64,")
+                .unwrap_or(&base64_data);
+            if let Ok(image_bytes) = base64::engine::general_purpose::STANDARD.decode(clean_b64) {
+                let attachment = serenity::CreateAttachment::bytes(image_bytes, "server_icon.png");
+                reply = reply.attachment(attachment);
+                embed = embed.thumbnail("attachment://server_icon.png");
+            }
         }
-    }
+        (reply, embed)
+    };
 
     ctx.send(reply.embed(embed)).await?;
     Ok(())
@@ -272,11 +295,9 @@ pub async fn help(ctx: Context<'_>, command_name: Option<String>) -> Result<(), 
         {
             let detailed_help = command
                 .help_text
-                .clone()
-                .or_else(|| command.description.clone())
-                .unwrap_or_else(|| {
-                    "No detailed documentation available for this command.".to_string()
-                });
+                .as_deref()
+                .or(command.description.as_deref())
+                .unwrap_or("No detailed documentation available for this command.");
 
             ctx.send(
                 poise::CreateReply::default().embed(
@@ -303,11 +324,7 @@ pub async fn help(ctx: Context<'_>, command_name: Option<String>) -> Result<(), 
                 .description
                 .as_deref()
                 .unwrap_or("No description provided.");
-            (
-                format!("`~{}`", command.name),
-                description.to_string(),
-                false,
-            )
+            (format!("`~{}`", command.name), description, false)
         })
         .collect();
 

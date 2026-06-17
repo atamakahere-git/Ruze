@@ -114,7 +114,9 @@ pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
     let mut reply = poise::CreateReply::default();
 
     if let Some(base64_data) = favicon_b64 {
-        let clean_b64 = base64_data.replace("data:image/png;base64,", "");
+        let clean_b64 = base64_data
+            .strip_prefix("data:image/png;base64,")
+            .unwrap_or(&base64_data);
         if let Ok(image_bytes) =
             base64::engine::general_purpose::STANDARD.decode(clean_b64)
         {

@@ -135,11 +135,14 @@ async fn event_handler(
             tracing::info!(name = %data_about_bot.user.name, "bot logged in");
         }
         serenity::FullEvent::GuildMemberAddition { new_member } => {
-            let Some(system_channel) = new_member
-                .guild_id
-                .to_guild_cached(ctx)
-                .and_then(|g| g.system_channel_id)
-            else {
+            let (system_channel_id, member_count) = {
+                let Some(guild) = new_member.guild_id.to_guild_cached(ctx) else {
+                    return Ok(());
+                };
+                (guild.system_channel_id, guild.member_count)
+            };
+
+            let Some(system_channel) = system_channel_id else {
                 return Ok(());
             };
 
@@ -160,11 +163,7 @@ async fn event_handler(
                     "https://i.pinimg.com/originals/5d/15/4b/5d154b68de57a87600fe9b98d692802c.gif",
                 )
                 .footer(serenity::CreateEmbedFooter::new(format!(
-                    "Member Count: #{}",
-                    new_member
-                        .guild_id
-                        .to_guild_cached(ctx)
-                        .map_or(0, |g| g.member_count)
+                    "Member Count: #{member_count}"
                 )));
 
             let message = serenity::CreateMessage::new().embed(welcome_embed);
@@ -181,11 +180,12 @@ async fn event_handler(
                 .ok();
         }
         serenity::FullEvent::Message { new_message } => {
-            let targets = data.target_channel_id_list.read().await;
+            let should_relay = {
+                let targets = data.target_channel_id_list.read().await;
+                targets.contains(&new_message.channel_id)
+            };
 
-            if targets.contains(&new_message.channel_id)
-                && new_message.author.id != ctx.cache.current_user().id
-            {
+            if should_relay && new_message.author.id != ctx.cache.current_user().id {
                 data.dc_event_tx
                     .send(FromDiscordEvent {
                         username: new_message.author.name.clone(),

@@ -102,7 +102,11 @@ pub async fn start_bot(
 
                 tokio::spawn(async move {
                     if let Err(why) = target_channel.say(http_clone, msg).await {
-                        tracing::warn!("failed to send to channel {target_channel}: {why:?}");
+                        tracing::warn!(
+                            channel = %target_channel,
+                            error = %why,
+                            "failed to forward Minecraft event to Discord"
+                        );
                     }
                 });
             }
@@ -120,7 +124,7 @@ async fn event_handler(
 ) -> Result<(), BotError> {
     match event {
         serenity::FullEvent::Ready { data_about_bot, .. } => {
-            tracing::info!("Logged in as {}", data_about_bot.user.name);
+            tracing::info!(name = %data_about_bot.user.name, "bot logged in");
         }
         serenity::FullEvent::GuildMemberAddition { new_member } => {
             let Some(system_channel) = new_member
@@ -130,6 +134,12 @@ async fn event_handler(
             else {
                 return Ok(());
             };
+
+            tracing::info!(
+                user = %new_member.user.name,
+                guild = %new_member.guild_id,
+                "guild member joined"
+            );
 
             let welcome_embed = serenity::CreateEmbed::new()
                 .title("💥 A New Target Approaches! 💥")
@@ -150,7 +160,17 @@ async fn event_handler(
                 )));
 
             let message = serenity::CreateMessage::new().embed(welcome_embed);
-            let _ = system_channel.send_message(&ctx.http, message).await;
+            system_channel
+                .send_message(&ctx.http, message)
+                .await
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        channel = %system_channel,
+                        error = %e,
+                        "failed to send welcome message"
+                    );
+                })
+                .ok();
         }
         serenity::FullEvent::Message { new_message } => {
             let targets = data.target_channel_id_list.read().await;
@@ -158,13 +178,20 @@ async fn event_handler(
             if targets.contains(&new_message.channel_id)
                 && new_message.author.id != ctx.cache.current_user().id
             {
-                let _ = data
-                    .dc_event_tx
+                data.dc_event_tx
                     .send(FromDiscordEvent {
                         username: new_message.author.name.clone(),
                         content: new_message.content.clone(),
                     })
-                    .await;
+                    .await
+                    .inspect_err(|e| {
+                        tracing::warn!(
+                            user = %new_message.author.name,
+                            error = %e,
+                            "discord→mc event dropped"
+                        );
+                    })
+                    .ok();
             }
         }
         _ => {}

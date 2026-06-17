@@ -20,6 +20,7 @@ fn start_bridge_help() -> String {
 /// Check if I'm alive!
 #[poise::command(slash_command, prefix_command, help_text_fn = ping_help)]
 pub async fn ping(ctx: Context<'_>) -> Result<(), BotError> {
+    tracing::info!(user = %ctx.author().name, "command /ping executed");
     ctx.say("UwU Helloo!").await?;
     Ok(())
 }
@@ -32,11 +33,18 @@ pub async fn ping(ctx: Context<'_>) -> Result<(), BotError> {
     help_text_fn = info_help
 )]
 pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
-    let _ = ctx.defer().await;
+    ctx.defer()
+        .await
+        .inspect_err(|e| tracing::warn!("failed to defer interaction: {e}"))
+        .ok();
 
     let query_address = &ctx.data().mc_server_address;
 
-    tracing::debug!("Using query address {query_address}");
+    tracing::info!(
+        user = %ctx.author().name,
+        server = %query_address,
+        "command /info executed"
+    );
 
     let rcon_guard = ctx.data().rcon_client.lock().await;
     let rcon_response = match rcon_guard.send_command("list") {
@@ -129,14 +137,20 @@ pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
 )]
 pub async fn start_bridge(ctx: Context<'_>) -> Result<(), BotError> {
     let current_channel_id = ctx.channel_id();
-    let shared_list = &ctx.data().target_channel_id_list;
 
     {
+        let shared_list = &ctx.data().target_channel_id_list;
         let mut lock = shared_list.write().await;
         if !lock.contains(&current_channel_id) {
             lock.push(current_channel_id);
         }
     }
+
+    tracing::info!(
+        user = %ctx.author().name,
+        channel = %current_channel_id,
+        "bridge started"
+    );
 
     ctx.say(format!(
         "🟢 **Bridge Established!** Minecraft chat will now sync to <#{current_channel_id}>."
@@ -157,6 +171,12 @@ pub async fn stop_bridge(ctx: Context<'_>) -> Result<(), BotError> {
     let was_bridged = lock.len() < len_before;
 
     if was_bridged {
+        tracing::info!(
+            user = %ctx.author().name,
+            channel = %current_channel_id,
+            "bridge stopped"
+        );
+
         ctx.send(
             poise::CreateReply::default().embed(
                 serenity::CreateEmbed::new()
@@ -213,6 +233,12 @@ pub async fn is_owner_or_admin(ctx: Context<'_>) -> Result<bool, BotError> {
 /// Show all available commands or get detailed help for a specific one.
 #[poise::command(slash_command, prefix_command)]
 pub async fn help(ctx: Context<'_>, command_name: Option<String>) -> Result<(), BotError> {
+    tracing::info!(
+        user = %ctx.author().name,
+        target = ?command_name,
+        "command /help executed"
+    );
+
     if let Some(target) = command_name {
         if let Some(command) = ctx
             .framework()

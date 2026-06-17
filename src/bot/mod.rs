@@ -14,6 +14,10 @@ pub enum BotError {
     Serenity(Box<poise::serenity_prelude::Error>),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    #[error("configuration error: {0}")]
+    Config(#[from] crate::consts::ConfigError),
+    #[error("rcon error: {0}")]
+    Rcon(#[from] crate::rcon::RconError),
 }
 
 impl From<poise::serenity_prelude::Error> for BotError {

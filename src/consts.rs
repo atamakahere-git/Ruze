@@ -85,14 +85,26 @@ impl Config {
     /// Returns `ConfigError` if a file that exists cannot be read or parsed,
     /// or if required fields are missing after merging all sources.
     pub fn load() -> Result<Self, ConfigError> {
+        tracing::info!("loading configuration...");
+
         let mut config = Self::empty();
 
-        Self::merge_file(&mut config, "/etc/ruze.toml")?;
-        Self::merge_file(&mut config, &xdg_config_path())?;
-        Self::merge_file(&mut config, &home_ruze_path())?;
+        for (path, desc) in [
+            ("/etc/ruze.toml", "global system config"),
+            (&xdg_config_path(), "XDG config"),
+            (&home_ruze_path(), "home config"),
+        ] {
+            match Self::merge_file(&mut config, path) {
+                Ok(Some(())) => tracing::debug!(%path, "merged {desc}"),
+                Ok(None) => tracing::debug!(%path, "{desc} not found, skipped"),
+                Err(e) => return Err(e),
+            }
+        }
+
         Self::overlay_env(&mut config);
 
         config.validate()?;
+        tracing::info!("configuration validated");
         Ok(config)
     }
 
@@ -115,10 +127,13 @@ impl Config {
         }
     }
 
-    fn merge_file(config: &mut Self, path: &str) -> Result<(), ConfigError> {
+    /// Returns `Ok(Some(()))` if the file existed and was merged,
+    /// `Ok(None)` if the file doesn't exist (skipped),
+    /// `Err(...)` on read or parse errors.
+    fn merge_file(config: &mut Self, path: &str) -> Result<Option<()>, ConfigError> {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(ConfigError::ReadFile {
                     path: path.to_string(),
@@ -133,7 +148,7 @@ impl Config {
         })?;
 
         Self::merge_into(config, &partial);
-        Ok(())
+        Ok(Some(()))
     }
 
     fn merge_into(target: &mut Self, source: &Self) {
@@ -195,9 +210,7 @@ impl Config {
         if let Ok(v) = std::env::var("RUZE_MC_SERVER_ADDRESS") {
             config.minecraft.server_address = v;
         } else if let Ok(v) = std::env::var("MC_SERVER_QUERY_ADDRESS") {
-            tracing::warn!(
-                "MC_SERVER_QUERY_ADDRESS is deprecated; use RUZE_MC_SERVER_ADDRESS"
-            );
+            tracing::warn!("MC_SERVER_QUERY_ADDRESS is deprecated; use RUZE_MC_SERVER_ADDRESS");
             config.minecraft.server_address = v;
         }
 
@@ -234,8 +247,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn xdg_config_home() -> PathBuf {
-    std::env::var("XDG_CONFIG_HOME")
-        .map_or_else(|_| home_dir().join(".config"), PathBuf::from)
+    std::env::var("XDG_CONFIG_HOME").map_or_else(|_| home_dir().join(".config"), PathBuf::from)
 }
 
 fn xdg_config_path() -> String {

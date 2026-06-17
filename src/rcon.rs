@@ -1,22 +1,29 @@
 use mc_rcon::RconClient;
 
+/// Errors that can occur when connecting to or authenticating with a Minecraft RCON server.
+#[derive(Debug, thiserror::Error)]
+pub enum RconError {
+    #[error("rcon connection failed: {0}")]
+    Connect(#[from] std::io::Error),
+    #[error("rcon authentication failed: {0}")]
+    Auth(String),
+}
+
 /// Connect to a Minecraft RCON server.
 ///
 /// # Errors
 ///
-/// Returns `std::io::Error` if the TCP connection fails.
-///
-/// Logs a warning if authentication fails; the client is still returned so the
-/// caller can decide how to handle it.
-pub fn connect(address: &str, password: &str) -> std::io::Result<RconClient> {
-    let client = RconClient::connect(address.to_string()).map_err(|e| {
-        tracing::error!("Unable to connect to Minecraft RCON server: {e}");
-        std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "RCON connection failed")
-    })?;
+/// Returns `RconError::Connect` if the TCP connection fails, or `RconError::Auth`
+/// if the login credentials are rejected.
+pub fn connect(address: &str, password: &str) -> Result<RconClient, RconError> {
+    let client = RconClient::connect(address.to_string())
+        .inspect_err(|e| tracing::error!("unable to connect to RCON at {address}: {e}"))?;
 
-    if let Err(e) = client.log_in(password) {
-        tracing::error!("Failed to authenticate with RCON server: {e}");
-    }
+    client
+        .log_in(password)
+        .inspect_err(|e| tracing::error!("rcron authentication failed: {e}"))
+        .map_err(|e| RconError::Auth(e.to_string()))?;
 
+    tracing::info!("RCON connected to {address}");
     Ok(client)
 }

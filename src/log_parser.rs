@@ -78,16 +78,18 @@ pub fn parse_log_line(line: &str) -> Option<MinecraftEvent> {
         Regex::new(
             r"^\[\d{2}:\d{2}:\d{2}\]\s\[[^\]]+/INFO\]:\s(?:\[Not Secure\]\s)?<(?P<username>[a-zA-Z0-9_]{3,16})>\s(?P<message>.+)$",
         )
-        .unwrap()
+        .expect("valid static chat regex pattern")
     });
 
     static SYSTEM_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^\[\d{2}:\d{2}:\d{2}\]\s\[[^\]]+/INFO\]:\s(?P<payload>.+)$").unwrap()
+        Regex::new(r"^\[\d{2}:\d{2}:\d{2}\]\s\[[^\]]+/INFO\]:\s(?P<payload>.+)$")
+            .expect("valid static system regex pattern")
     });
 
     if let Some(captures) = CHAT_REGEX.captures(line) {
         let username = captures.name("username")?.as_str().to_string();
         let message = captures.name("message")?.as_str().to_string();
+        tracing::debug!(username = %username, "chat event parsed");
         return Some(MinecraftEvent::Chat { username, message });
     }
 
@@ -95,6 +97,7 @@ pub fn parse_log_line(line: &str) -> Option<MinecraftEvent> {
         let payload = captures.name("payload")?.as_str();
 
         if payload.contains("joined the game") {
+            tracing::info!(payload = %payload, "player joined");
             return Some(MinecraftEvent::PlayerJoinLeave {
                 system_message: payload.to_string(),
                 is_join: true,
@@ -102,6 +105,7 @@ pub fn parse_log_line(line: &str) -> Option<MinecraftEvent> {
         }
 
         if payload.contains("left the game") {
+            tracing::info!(payload = %payload, "player left");
             return Some(MinecraftEvent::PlayerJoinLeave {
                 system_message: payload.to_string(),
                 is_join: false,
@@ -109,18 +113,21 @@ pub fn parse_log_line(line: &str) -> Option<MinecraftEvent> {
         }
 
         if is_ignorable_system_message(payload) {
+            tracing::trace!("ignored system line");
             return None;
         }
 
         if payload.contains("has made the advancement")
             || payload.contains("has completed the challenge")
         {
+            tracing::info!(payload = %payload, "advancement earned");
             return Some(MinecraftEvent::Advancement {
                 system_message: payload.to_string(),
             });
         }
 
         if is_death_message(payload) {
+            tracing::info!(payload = %payload, "death event");
             return Some(MinecraftEvent::Death {
                 system_message: payload.to_string(),
             });

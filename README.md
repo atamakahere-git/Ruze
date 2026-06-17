@@ -2,102 +2,217 @@
 
 # 💥 RUZE
 
-RUZE is a lightweight, high-performance Discord-Minecraft bridge bot themed around Reze from *Chainsaw Man*. Built in Rust using the `poise` and `serenity` frameworks, RUZE establishes a seamless, two-way communication channel between your Discord server and a Minecraft server.
+RUZE is a lightweight, high-performance Discord–Minecraft bridge bot themed after Reze from *Chainsaw Man*. Built in Rust using `poise` and `serenity`, RUZE establishes a seamless, two-way communication channel between your Discord server and a Minecraft server.
 
-Unlike traditional bridges, RUZE uses direct log-tailing to read Minecraft server events without requiring any mods or plugins installed on the server itself.
+Unlike traditional bridges, RUZE uses direct log-tailing to read Minecraft server events **without requiring any mods or plugins** installed on the server itself.
 
 ---
 
 ## Features
 
-* **Zero-Client Bridge:** Uses `linemux` to tail and parse local Minecraft server logs natively. No client mods, Forge, Fabric, or Paper plugins required!
-* **Live Chat Sync:** Forwards Minecraft in-game chat to Discord and vice versa.
-* **Server Events:** Automatically formats and beams Minecraft **achievements** and **death messages** directly into your Discord channel.
-* **Reze Aesthetics:** Includes beautifully styled, character-themed embeds and interactive help menus.
-* **Secure Access:** Features a custom validation gate restricting critical bridge management commands to the Bot Owner and Server Administrators.
+- **Zero-Client Bridge** — Tails Minecraft server logs natively via `linemux`. No client mods, Forge, Fabric, or Paper plugins required.
+- **Live Chat Sync** — Forwards Minecraft in-game chat to Discord and vice versa.
+- **Server Events** — Death messages, advancements, and player join/leave formatted and beamed into Discord.
+- **Player List** — `/info` command queries the server and displays online players with latency.
+- **Structured Logging** — Full `tracing`-based observability with configurable verbosity (`RUST_LOG`).
+- **Secure Access** — Critical bridge commands restricted to the Bot Owner and Server Administrators.
 
 ![RUZE USAGE EXAMPLE](images/discord.png)
 ![RUZE USAGE EXAMPLE](images/minecraft.png)
 
 ---
 
-## Prerequisites & Server Configuration
+## Minecraft Server Configuration
 
-To allow RUZE to communicate with your Minecraft server, you must enable **RCON** (for sending Discord messages into Minecraft and querying player lists) and **Query** (for server status updates) in your Minecraft server's configuration.
-
-### 1. Update `server.properties`
-
-Open your Minecraft server's `server.properties` file and ensure the following options are set:
+Enable **RCON** (for sending Discord → Minecraft messages and querying player lists) and **Query** (for server status) in your Minecraft server's `server.properties`:
 
 ```properties
-# Enable RCON (Remote Control)
 enable-rcon=true
 rcon.port=25575
 rcon.password=your_secure_rcon_password_here
 
-# Enable Query Port
 enable-query=true
 query.port=25565
-
 ```
 
-*Restart your Minecraft server after saving these changes.*
+Restart your Minecraft server after saving these changes.
 
 ---
 
-## Required Environment Variables
+## Configuration
 
-RUZE requires a `.env` file in the root directory of the project to manage paths, API tokens, and security credentials securely. **All of the following variables must be configured for the bot to start.**
+RUZE uses a layered configuration system. Values are resolved from **lowest to highest priority**:
 
-Create a file named `.env` and populate it with your configuration:
+| Priority | Source | Purpose |
+|----------|--------|---------|
+| 1 (lowest) | `/etc/ruze.toml` | System-wide defaults (all users) |
+| 2 | `$XDG_CONFIG_HOME/ruze.toml` | Per-user config (falls back to `~/.config/ruze.toml`) |
+| 3 | `$HOME/.ruze.toml` | Per-user home-directory override |
+| 4 (highest) | Environment variables | `RUZE_*` prefix |
 
-```env
-# Path to your Minecraft server's active log file
-LOG_PATH=/path/to/your/minecraft/logs/latest.log
+Each layer merges on top of the previous one — later sources override earlier ones. Environment variables always take precedence.
 
-# Your Discord Bot Application Token
-DISCORD_TOKEN=your_discord_bot_token_here
+### TOML configuration file
 
-# The RCON password set in your server.properties
-RCON_PASSWORD=your_secure_rcon_password_here
+Create a `ruze.toml` in any of the supported paths above. All sections are required unless a default is noted.
 
-# The IP and Port configuration for RCON (use localhost:25575 if hosted on the same machine)
-RCON_SERVER_ADDRESS=localhost:25575
+```toml
+[discord]
+# Your Discord Bot Application token
+token = "your_discord_bot_token_here"
 
-# Minecraft Server Query Address (use localhost:25565 if hosted on the same machine)
-MC_SERVER_QUERY_ADDRESS=localhost:25565
+[rcon]
+# RCON server address and port (default: "localhost:25575")
+address = "localhost:25575"
+# RCON password set in server.properties
+password = "your_secure_rcon_password_here"
 
+[minecraft]
+# Minecraft server query address and port (default: "localhost:25565")
+server_address = "localhost:25565"
+
+[bot]
+# Discord user ID of the bot owner
+owner_id = 1314616785156444175
+
+[log]
+# Absolute path to the Minecraft server's latest.log file
+path = "/var/minecraft/logs/latest.log"
 ```
 
----
+### Environment variables (highest priority)
 
-## Getting Started
+Each TOML field has a corresponding `RUZE_*` environment variable. Use these for Docker, systemd, or CI deployments.
 
-### 1. Enable Privileged Gateway Intents
+| Variable | TOML field | Required | Default |
+|----------|-----------|----------|---------|
+| `RUZE_DISCORD_TOKEN` | `discord.token` | Yes | — |
+| `RUZE_LOG_PATH` | `log.path` | Yes | — |
+| `RUZE_RCON_PASSWORD` | `rcon.password` | Yes | — |
+| `RUZE_RCON_ADDRESS` | `rcon.address` | No | `localhost:25575` |
+| `RUZE_MC_SERVER_ADDRESS` | `minecraft.server_address` | No | `localhost:25565` |
+| `RUZE_OWNER_ID` | `bot.owner_id` | Yes | — |
 
-Because RUZE utilizes event loops to listen for server members joining and standard text commands, you must enable **Privileged Gateway Intents** in the Discord Developer Portal:
+<details>
+<summary>Deprecated environment variable names</summary>
 
-1. Go to the [Discord Developer Portal](https://www.google.com/search?q=https://discord.com/developers/applications).
-2. Select your Application and navigate to the **Bot** tab.
-3. Scroll down to **Privileged Gateway Intents** and turn **ON** the **Server Members Intent** and **Message Content Intent**.
+The old variable names are still detected for backward compatibility but log a deprecation warning:
 
-### 2. Compile and Run
+| Deprecated | Replacement |
+|-----------|-------------|
+| `DISCORD_TOKEN` | `RUZE_DISCORD_TOKEN` |
+| `LOG_PATH` | `RUZE_LOG_PATH` |
+| `RCON_PASSWORD` | `RUZE_RCON_PASSWORD` |
+| `RCON_SERVER_ADDRESS` | `RUZE_RCON_ADDRESS` |
+| `MC_SERVER_QUERY_ADDRESS` | `RUZE_MC_SERVER_ADDRESS` |
+</details>
 
-Ensure you have the Rust toolchain installed. Clone the repository, navigate to the folder, and execute:
+### Quick-start: local config file
+
+The fastest way to get started is a single local config file:
 
 ```bash
+mkdir -p ~/.config
+cat > ~/.config/ruze.toml << 'EOF'
+[discord]
+token = "your_discord_bot_token_here"
+
+[rcon]
+password = "your_secure_rcon_password_here"
+
+[bot]
+owner_id = 1314616785156444175
+
+[log]
+path = "/var/minecraft/logs/latest.log"
+EOF
+```
+
+---
+
+## Discord Setup
+
+Enable **Privileged Gateway Intents** in the [Discord Developer Portal](https://discord.com/developers/applications):
+
+1. Select your Application → **Bot** tab.
+2. Under **Privileged Gateway Intents**, enable **Server Members Intent** and **Message Content Intent**.
+
+---
+
+## Build & Run
+
+```bash
+# Debug build
+cargo run
+
+# Release build (recommended for production)
+cargo run --release
+```
+
+### Logging
+
+RUZE outputs structured logs to stderr. Control verbosity via the `RUST_LOG` environment variable:
+
+```bash
+# Default — info and above only
 cargo run --release
 
+# Verbose — debug messages included
+RUST_LOG=debug cargo run --release
+
+# Everything — trace-level detail
+RUST_LOG=trace cargo run --release
+
+# Silence noisy crates, show only RUZE logs
+RUST_LOG=info,serenity=warn,tracing=warn cargo run --release
+```
+
+Log format includes RFC 3339 timestamps, file location, and structured fields:
+
+```
+2026-06-17T10:30:00.123Z  INFO main.rs:18 starting Ruze bridge...
+2026-06-17T10:30:00.125Z  INFO consts.rs:88 loading configuration...
+2026-06-17T10:30:00.127Z DEBUG consts.rs:97 merged /home/user/.config/ruze.toml
+2026-06-17T10:30:00.128Z  INFO consts.rs:106 configuration validated
+2026-06-17T10:30:00.130Z  INFO main.rs:32 log watcher started | path=/var/mc/logs/latest.log
+2026-06-17T10:30:00.131Z  INFO rcon.rs:16 RCON connected to localhost:25575
+2026-06-17T10:30:00.132Z  INFO main.rs:62 Discord → Minecraft relay started
+2026-06-17T10:30:00.133Z  INFO main.rs:73 bridge is now running
+2026-06-17T10:30:03.456Z  INFO handler.rs:123 bot logged in | name=Reze#1234
+2026-06-17T10:30:04.789Z DEBUG log_parser.rs:91 chat event parsed | username=Herobrine
+2026-06-17T10:30:04.790Z  INFO main.rs:46 mc→dc | username=Herobrine
+2026-06-17T10:30:10.001Z  INFO commands.rs:24 command /ping executed | user=Admin
 ```
 
 ---
 
 ## Bot Commands
 
-All standard commands utilize the `~` prefix or can be invoked via Slash Commands.
+All commands support both `~` prefix (`~ping`) and Slash Commands (`/ping`).
 
-* `~help` — Displays a beautiful, filtered menu of all available commands.
-* `~ping`  — Checks if the bot is alive and operational.
-* `~info`  —Query the Minecraft server and returns a clean list of all players currently active in-game.
-* `~start_bridge` — (*Owner/Admin Only*) Binds the active `linemux` log stream to the current Discord channel to initiate the live chat bridge.
-* `_stop_bridge` — (*Owner/Admin Only*) Unbinds the log stream and halts all chat forwarding to the current channel.
+| Command | Access | Description |
+|---------|--------|-------------|
+| `~help` | Everyone | List all commands or get detailed help for a specific one |
+| `~ping` | Everyone | Check if the bot is alive |
+| `~info` | Everyone | Query the Minecraft server for online players, MOTD, and latency |
+| `~start_bridge` | Owner/Admin | Bind the log stream to the current channel — live chat forwarding begins |
+| `~stop_bridge` | Owner/Admin | Unbind the log stream and halt chat forwarding to the current channel |
+
+The bot also responds to `hey reze` and `hey reze,` as alternative prefixes.
+
+---
+
+## Architecture
+
+```
+src/
+  main.rs          — Entry point: channel setup, task spawning, glue
+  consts.rs        — Configuration loading (TOML + env vars, XDG paths)
+  log_parser.rs    — Minecraft log line → structured event parsing
+  rcon.rs          — RCON client connection & authentication
+  bot/
+    mod.rs         — BotError enum, module docs
+    types.rs       — Data, FromDiscordEvent, FromMinecraftEvent
+    handler.rs     — Framework setup, event_handler, mc→dc forwarding
+    commands.rs    — All poise slash/prefix commands
+```

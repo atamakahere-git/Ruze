@@ -28,6 +28,7 @@ pub struct Data {
     pub mc_status_client: McClient,
     pub target_channel_id_list: Arc<RwLock<Vec<serenity::ChannelId>>>,
     pub rcon_client: Arc<Mutex<RconClient>>,
+    pub mc_server_address: String,
 }
 
 impl From<MinecraftEvent> for FromMinecraftEvent {

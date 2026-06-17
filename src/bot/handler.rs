@@ -1,9 +1,9 @@
-use std::{collections::HashSet, env, sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use mc_rcon::RconClient;
 use poise::serenity_prelude as serenity;
-use rust_mc_status::McClient;
 use poise::serenity_prelude::Mentionable;
+use rust_mc_status::McClient;
 use tokio::sync::{
     Mutex, RwLock,
     mpsc::{Receiver, Sender},
@@ -13,22 +13,19 @@ use super::commands;
 use super::types::{Data, FromDiscordEvent, FromMinecraftEvent};
 use super::BotError;
 
-const OWNER_ID: u64 = 1_314_616_785_156_444_175;
-
 /// Start the Discord bot, register commands, and begin dispatching events.
 ///
 /// # Errors
 ///
-/// Returns `BotError` if the `DISCORD_TOKEN` env var is missing, the client
-/// fails to build, or the bot fails to start.
+/// Returns `BotError` if the client fails to build or the bot fails to start.
 pub async fn start_bot(
+    token: String,
+    owner_id: u64,
+    mc_server_address: String,
     mut mc_event_rx: Receiver<FromMinecraftEvent>,
     dc_event_tx: Sender<FromDiscordEvent>,
     rcon_client: Arc<Mutex<RconClient>>,
 ) -> Result<(), BotError> {
-    let token =
-        env::var("DISCORD_TOKEN").map_err(|_| BotError::EnvVar("DISCORD_TOKEN".into()))?;
-
     let intents =
         serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT;
 
@@ -40,7 +37,7 @@ pub async fn start_bot(
         .with_max_parallel(10);
 
     let mut owners = HashSet::new();
-    owners.insert(serenity::UserId::new(OWNER_ID));
+    owners.insert(serenity::UserId::new(owner_id));
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -66,7 +63,8 @@ pub async fn start_bot(
             owners,
             ..Default::default()
         })
-        .setup(|ctx, _ready, framework| {
+        .setup(move |ctx, _ready, framework| {
+            let addr = mc_server_address.clone();
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
 
@@ -75,6 +73,7 @@ pub async fn start_bot(
                     mc_status_client,
                     target_channel_id_list: bridge_channel_list.clone(),
                     rcon_client,
+                    mc_server_address: addr,
                 })
             })
         })

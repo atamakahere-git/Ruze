@@ -1,4 +1,4 @@
-use std::{env, sync::Arc};
+use std::sync::Arc;
 
 use dotenvy::dotenv;
 use linemux::MuxedLines;
@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use bot::types::{FromDiscordEvent, FromMinecraftEvent};
 
 mod bot;
+mod consts;
 mod log_parser;
 mod rcon;
 
@@ -16,13 +17,18 @@ async fn main() -> Result<(), bot::BotError> {
     tracing_subscriber::fmt::init();
     dotenv().ok();
 
+    let config = consts::Config::load().map_err(|e| {
+        tracing::error!("Configuration error: {e}");
+        bot::BotError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            e.to_string(),
+        ))
+    })?;
+
     let (mc_event_tx, mc_event_rx) = mpsc::channel::<FromMinecraftEvent>(32);
     let (dc_event_tx, mut dc_event_rx) = mpsc::channel::<FromDiscordEvent>(32);
 
-    let log_path = env::var("LOG_PATH").map_err(|_| {
-        tracing::error!("No LOG_PATH environment variable found!");
-        bot::BotError::EnvVar("LOG_PATH".into())
-    })?;
+    let log_path = config.log.path.clone();
 
     tokio::spawn(async move {
         let mut lines_ok = match MuxedLines::new() {
@@ -49,7 +55,7 @@ async fn main() -> Result<(), bot::BotError> {
         }
     });
 
-    let rcon_client = rcon::connect()?;
+    let rcon_client = rcon::connect(&config.rcon.address, &config.rcon.password)?;
     let shared_rcon = Arc::new(Mutex::new(rcon_client));
     let rcon_clone = Arc::clone(&shared_rcon);
 
@@ -66,6 +72,15 @@ async fn main() -> Result<(), bot::BotError> {
         }
     });
 
-    bot::handler::start_bot(mc_event_rx, dc_event_tx, shared_rcon).await?;
+    bot::handler::start_bot(
+        config.discord.token,
+        config.bot.owner_id,
+        config.minecraft.server_address,
+        mc_event_rx,
+        dc_event_tx,
+        shared_rcon,
+    )
+    .await?;
+
     Ok(())
 }

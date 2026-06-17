@@ -14,8 +14,6 @@ pub enum BotError {
     Serenity(Box<serenity::Error>),
     #[error("{0}")]
     Io(#[from] std::io::Error),
-    #[error("environment variable `{0}` not set")]
-    EnvVar(String),
 }
 
 impl From<serenity::Error> for BotError {

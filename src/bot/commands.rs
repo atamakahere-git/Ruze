@@ -1,4 +1,4 @@
-use std::{env, fmt::Write};
+use std::fmt::Write;
 
 use base64::Engine;
 use poise::serenity_prelude as serenity;
@@ -34,8 +34,7 @@ pub async fn ping(ctx: Context<'_>) -> Result<(), BotError> {
 pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
     let _ = ctx.defer().await;
 
-    let query_address =
-        env::var("MC_SERVER_QUERY_ADDRESS").unwrap_or_else(|_| "localhost:25565".to_string());
+    let query_address = &ctx.data().mc_server_address;
 
     tracing::debug!("Using query address {query_address}");
 
@@ -66,7 +65,7 @@ pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
     if let Ok(status) = ctx
         .data()
         .mc_status_client
-        .ping(&query_address, rust_mc_status::ServerEdition::Java)
+        .ping(query_address, rust_mc_status::ServerEdition::Java)
         .await
     {
         latency_ms = status.latency;

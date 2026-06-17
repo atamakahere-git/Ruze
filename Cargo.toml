@@ -1,6 +1,6 @@
 [package]
 name = "meow"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
@@ -23,3 +23,8 @@ nonstandard_style = "deny"
 [lints.clippy]
 all = { level = "deny", priority = 10 }
 pedantic = { level = "warn", priority = 3 }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

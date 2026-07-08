@@ -244,6 +244,234 @@ pub async fn stop_bridge(ctx: Context<'_>) -> Result<(), BotError> {
     Ok(())
 }
 
+fn stats_help() -> String {
+    String::from("Show cumulative stats for a player (or yourself if no name given).")
+}
+
+fn playtime_help() -> String {
+    String::from("Show play time breakdown for a player, including the last 7 days.")
+}
+
+fn leaderboard_help() -> String {
+    String::from("Show the top 10 players by total play time.")
+}
+
+/// Format seconds as a human-readable duration (e.g. "1d 3h 46m").
+fn format_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
+    }
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if minutes > 0 || parts.is_empty() {
+        parts.push(format!("{minutes}m"));
+    }
+    parts.join(" ")
+}
+
+/// Show cumulative stats for a player.
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("stat"),
+    help_text_fn = stats_help
+)]
+pub async fn stats(
+    ctx: Context<'_>,
+    #[description = "Minecraft username"] player: Option<String>,
+) -> Result<(), BotError> {
+    let username = player.unwrap_or_else(|| ctx.author().name.clone());
+    tracing::info!(user = %ctx.author().name, target = %username, "command /stats executed");
+
+    let storage = &ctx.data().storage;
+    let uuid = storage.resolve_uuid(username.clone()).await.ok().flatten();
+
+    let Some(uuid) = uuid else {
+        ctx.say(format!("❌ No data found for player `{username}`."))
+            .await?;
+        return Ok(());
+    };
+
+    let stats = storage.get_player_stats(uuid.clone()).await;
+    let Some(stats) = stats.ok().flatten() else {
+        ctx.say(format!("❌ No stats recorded for player `{username}`."))
+            .await?;
+        return Ok(());
+    };
+
+    let embed = serenity::CreateEmbed::new()
+        .title(format!("📊 Stats: {username}"))
+        .color(0x34_98db)
+        .field(
+            "Total Play Time",
+            format!("`{}`", format_duration(stats.total_play_time_secs)),
+            true,
+        )
+        .field("Total Logins", format!("`{}`", stats.total_logins), true)
+        .field("Total Deaths", format!("`{}`", stats.total_deaths), true)
+        .field(
+            "Advancements",
+            format!("`{}`", stats.total_advancements),
+            true,
+        )
+        .field("Messages Sent", format!("`{}`", stats.total_messages), true)
+        .field("Commands Used", format!("`{}`", stats.total_commands), true);
+
+    let embed = if stats.first_login_ts > 0 {
+        embed.field(
+            "First Login",
+            format!("<t:{}:R>", stats.first_login_ts),
+            true,
+        )
+    } else {
+        embed
+    };
+
+    let embed = if stats.last_login_ts > 0 {
+        embed.field("Last Login", format!("<t:{}:R>", stats.last_login_ts), true)
+    } else {
+        embed
+    };
+
+    let embed = if stats.last_logout_ts > 0 {
+        embed.field(
+            "Last Logout",
+            format!("<t:{}:R>", stats.last_logout_ts),
+            true,
+        )
+    } else {
+        embed
+    };
+
+    ctx.send(poise::CreateReply::default().embed(embed)).await?;
+    Ok(())
+}
+
+/// Show play time breakdown for a player.
+#[poise::command(
+    slash_command,
+    prefix_command,
+    help_text_fn = playtime_help
+)]
+pub async fn playtime(
+    ctx: Context<'_>,
+    #[description = "Minecraft username"] player: Option<String>,
+) -> Result<(), BotError> {
+    let username = player.unwrap_or_else(|| ctx.author().name.clone());
+    tracing::info!(user = %ctx.author().name, target = %username, "command /playtime executed");
+
+    let storage = &ctx.data().storage;
+    let uuid = storage.resolve_uuid(username.clone()).await.ok().flatten();
+
+    let Some(uuid) = uuid else {
+        ctx.say(format!("❌ No data found for player `{username}`."))
+            .await?;
+        return Ok(());
+    };
+
+    let stats = storage.get_player_stats(uuid.clone()).await;
+    let Some(stats) = stats.ok().flatten() else {
+        ctx.say(format!("❌ No play time recorded for player `{username}`."))
+            .await?;
+        return Ok(());
+    };
+
+    let now = chrono::Local::now();
+    let dates: Vec<String> = (0..7)
+        .map(|i| {
+            (now - chrono::Duration::days(i))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .collect();
+
+    let recent = storage
+        .get_recent_play_time(uuid, dates.clone())
+        .await
+        .unwrap_or_default();
+
+    let week_total: u64 = recent.iter().map(|(_, s)| *s).sum();
+
+    let mut daily_desc = String::new();
+    for (date, secs) in &recent {
+        let _ = writeln!(
+            daily_desc,
+            "`{date}`: {}",
+            if *secs > 0 {
+                format_duration(*secs)
+            } else {
+                "—".to_string()
+            }
+        );
+    }
+
+    let embed = serenity::CreateEmbed::new()
+        .title(format!("⏱️ Play Time: {username}"))
+        .color(0x2ec_c71)
+        .field(
+            "Total",
+            format!("`{}`", format_duration(stats.total_play_time_secs)),
+            false,
+        )
+        .field(
+            "This Week",
+            format!("`{}`", format_duration(week_total)),
+            false,
+        )
+        .field("Last 7 Days", daily_desc, false);
+
+    ctx.send(poise::CreateReply::default().embed(embed)).await?;
+    Ok(())
+}
+
+/// Show the top 10 players by total play time.
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("top", "rank"),
+    help_text_fn = leaderboard_help
+)]
+pub async fn leaderboard(ctx: Context<'_>) -> Result<(), BotError> {
+    tracing::info!(user = %ctx.author().name, "command /leaderboard executed");
+
+    let storage = &ctx.data().storage;
+    let all_stats = storage.get_all_player_stats().await.unwrap_or_default();
+
+    if all_stats.is_empty() {
+        ctx.say("❌ No player stats recorded yet.").await?;
+        return Ok(());
+    }
+
+    let mut desc = String::new();
+    for (i, (uuid, stats)) in all_stats.iter().take(10).enumerate() {
+        let username = storage
+            .resolve_username(uuid.clone())
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| uuid[..8].to_string());
+        let _ = writeln!(
+            desc,
+            "{}. **{username}** — `{}`",
+            i + 1,
+            format_duration(stats.total_play_time_secs)
+        );
+    }
+
+    let embed = serenity::CreateEmbed::new()
+        .title("🏆 Play Time Leaderboard")
+        .color(0xf1_c4_0f)
+        .description(desc);
+
+    ctx.send(poise::CreateReply::default().embed(embed)).await?;
+    Ok(())
+}
+
 /// Verify the command invoker is the bot owner or a server administrator.
 pub async fn is_owner_or_admin(ctx: Context<'_>) -> Result<bool, BotError> {
     if ctx.framework().options().owners.contains(&ctx.author().id) {

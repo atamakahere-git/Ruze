@@ -126,7 +126,6 @@ pub enum StorageError {
 /// Each transaction runs inside `spawn_blocking` because redb transactions are
 /// not `Send`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Storage {
     db: Arc<Database>,
     mc_server_address: String,
@@ -467,7 +466,6 @@ fn remove_bridge(db: &Database) -> Result<(), StorageError> {
     Ok(())
 }
 
-#[allow(dead_code)]
 fn read_uuid_mapping(db: &Database, username: &str) -> Result<Option<String>, StorageError> {
     let rtxn = db.begin_read()?;
     let table = rtxn.open_table(USERNAME_UUID);
@@ -514,7 +512,6 @@ fn read_daily_play_time(db: &Database, uuid: &str, date: &str) -> Result<u64, St
         .map_or(0, |g| g.value()))
 }
 
-#[allow(dead_code)]
 fn read_recent_play_time(
     db: &Database,
     uuid: &str,
@@ -537,7 +534,6 @@ fn read_recent_play_time(
     Ok(result)
 }
 
-#[allow(dead_code)]
 fn read_all_player_stats(db: &Database) -> Result<Vec<(String, PlayerStats)>, StorageError> {
     let rtxn = db.begin_read()?;
     let table = rtxn.open_table(PLAYERS);
@@ -555,7 +551,6 @@ fn read_all_player_stats(db: &Database) -> Result<Vec<(String, PlayerStats)>, St
     Ok(result)
 }
 
-#[allow(dead_code)]
 fn reverse_resolve_uuid(db: &Database, uuid: &str) -> Result<Option<String>, StorageError> {
     let rtxn = db.begin_read()?;
     let table = rtxn.open_table(USERNAME_UUID);

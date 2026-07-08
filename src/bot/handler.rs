@@ -58,6 +58,9 @@ pub async fn start_bot(
                 commands::start_bridge(),
                 commands::stop_bridge(),
                 commands::info(),
+                commands::stats(),
+                commands::playtime(),
+                commands::leaderboard(),
                 commands::help(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {

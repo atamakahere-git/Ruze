@@ -1,16 +1,30 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
-use serde::{Deserialize, Serialize};
+use redb::{Database, ReadableDatabase, TableDefinition};
 
-use crate::consts;
+/// Single-row bridge binding table.
+///
+/// Key is the constant `"current"`; value is the tuple
+/// `(channel_id, guild_id, mc_server_address)`.
+const BRIDGE: TableDefinition<&str, (u64, u64, String)> = TableDefinition::new("bridge");
+
+/// Sentinel key for the single bridge row.
+const CURRENT: &str = "current";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
-    #[error("serialization failed: {0}")]
-    Serialize(#[from] toml::ser::Error),
-    #[error("deserialization failed: {0}")]
-    Deserialize(#[from] toml::de::Error),
+    #[error("redb database error: {0}")]
+    RedbDatabase(#[from] redb::DatabaseError),
+    #[error("redb transaction error: {0}")]
+    RedbTransaction(#[from] redb::TransactionError),
+    #[error("redb table error: {0}")]
+    RedbTable(#[from] redb::TableError),
+    #[error("redb storage error: {0}")]
+    RedbStorage(#[from] redb::StorageError),
+    #[error("redb commit error: {0}")]
+    RedbCommit(#[from] redb::CommitError),
     #[error("I/O error at `{path}`: {source}")]
     Io {
         path: PathBuf,
@@ -21,170 +35,252 @@ pub enum StorageError {
     BlockingPanic(String),
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct BridgeState {
-    bridged_channels: Vec<u64>,
+/// redb-backed persistence for the bridge binding.
+///
+/// Holds a long-lived `Arc<Database>` (`Send + Sync`) opened once at startup.
+/// Each transaction runs inside `spawn_blocking` because redb transactions are
+/// not `Send`.
+#[derive(Debug, Clone)]
+pub struct Storage {
+    db: Arc<Database>,
+    mc_server_address: String,
 }
 
-pub async fn load_channels() -> Result<Vec<serenity::ChannelId>, StorageError> {
-    let path = consts::bridge_state_path();
-    let path_display = path.display().to_string();
+impl Storage {
+    /// Open (or create) the redb database at `path`, storing the MC server
+    /// address for future row values.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` if the parent directory cannot be created or the
+    /// database cannot be opened.
+    pub fn open(path: PathBuf, mc_server_address: String) -> Result<Self, StorageError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| StorageError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
 
-    let result = tokio::task::spawn_blocking(move || read_bridge_file(&path)).await;
+        tracing::debug!(path = %path.display(), "opening redb database");
+        let db = Database::create(&path)?;
 
-    match result {
-        Ok(Ok(state)) => {
-            let channels: Vec<_> = state
-                .bridged_channels
-                .into_iter()
-                .map(serenity::ChannelId::new)
-                .collect();
-            tracing::info!(
-                count = channels.len(),
-                path = %path_display,
-                "loaded bridge state"
-            );
-            Ok(channels)
+        Ok(Self {
+            db: Arc::new(db),
+            mc_server_address,
+        })
+    }
+
+    /// Read the currently bridged Discord channel, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on any redb or I/O failure. An absent row (fresh
+    /// database) returns `Ok(None)` without error.
+    pub async fn get_bridge_channel(&self) -> Result<Option<serenity::ChannelId>, StorageError> {
+        let db = Arc::clone(&self.db);
+        let result = tokio::task::spawn_blocking(move || read_bridge(&db)).await;
+        match result {
+            Ok(Ok(channel_id)) => {
+                tracing::debug!(channel = ?channel_id, "loaded bridge binding from redb");
+                Ok(channel_id.map(serenity::ChannelId::new))
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "failed to read bridge binding, starting fresh");
+                Ok(None)
+            }
+            Err(join_err) => Err(StorageError::BlockingPanic(join_err.to_string())),
         }
-        Ok(Err(StorageError::Io { source, .. }))
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            tracing::debug!(
-                path = %path_display,
-                "bridge state file not found, starting fresh"
-            );
-            Ok(Vec::new())
+    }
+
+    /// Persist the bridge binding to `channel_id` (overwrites any prior row).
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on any redb or I/O failure.
+    pub async fn set_bridge_channel(
+        &self,
+        channel_id: u64,
+        guild_id: u64,
+    ) -> Result<(), StorageError> {
+        let mc_server_address = self.mc_server_address.clone();
+        let db = Arc::clone(&self.db);
+        let result =
+            tokio::task::spawn_blocking(move || write_bridge(&db, channel_id, guild_id, &mc_server_address))
+                .await;
+        match result {
+            Ok(Ok(())) => {
+                tracing::debug!(channel = channel_id, guild = guild_id, "bridge binding saved");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                tracing::error!(%e, "failed to save bridge binding");
+                Err(e)
+            }
+            Err(join_err) => Err(StorageError::BlockingPanic(join_err.to_string())),
         }
-        Ok(Err(e)) => {
-            tracing::warn!(%e, path = %path_display, "failed to load bridge state, starting fresh");
-            Ok(Vec::new())
+    }
+
+    /// Remove the bridge binding (no-op if absent).
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on any redb or I/O failure.
+    pub async fn clear_bridge_channel(&self) -> Result<(), StorageError> {
+        let db = Arc::clone(&self.db);
+        let result = tokio::task::spawn_blocking(move || remove_bridge(&db)).await;
+        match result {
+            Ok(Ok(())) => {
+                tracing::debug!("bridge binding cleared");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                tracing::error!(%e, "failed to clear bridge binding");
+                Err(e)
+            }
+            Err(join_err) => Err(StorageError::BlockingPanic(join_err.to_string())),
         }
-        Err(join_err) => Err(StorageError::BlockingPanic(join_err.to_string())),
     }
 }
 
-pub async fn save_channels(channels: Vec<u64>) -> Result<(), StorageError> {
-    let path = consts::bridge_state_path();
-    let count = channels.len();
+fn read_bridge(db: &Database) -> Result<Option<u64>, StorageError> {
+    let rtxn = db.begin_read()?;
+    let table = rtxn.open_table(BRIDGE);
 
-    tracing::debug!(
-        count,
-        path = %path.display(),
-        "persisting bridge state"
-    );
-
-    let result = tokio::task::spawn_blocking(move || write_bridge_file(&path, &channels)).await;
-
-    match result {
-        Ok(Ok(())) => {
-            tracing::debug!(count, "bridge state saved");
-            Ok(())
-        }
-        Ok(Err(e)) => {
-            tracing::error!(%e, "failed to save bridge state");
-            Err(e)
-        }
-        Err(join_err) => Err(StorageError::BlockingPanic(join_err.to_string())),
-    }
-}
-
-fn read_bridge_file(path: &Path) -> Result<BridgeState, StorageError> {
-    let content = std::fs::read_to_string(path).map_err(|e| StorageError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    Ok(toml::from_str(&content)?)
-}
-
-fn write_bridge_file(path: &Path, channels: &[u64]) -> Result<(), StorageError> {
-    let state = BridgeState {
-        bridged_channels: channels.to_vec(),
+    let table = match table {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(e) => return Err(e.into()),
     };
 
-    let serialized = toml::to_string(&state)?;
+    let value = table.get(CURRENT)?;
+    Ok(value.map(|guard| {
+        let (channel_id, _, _) = guard.value();
+        channel_id
+    }))
+}
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| StorageError::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
+fn write_bridge(
+    db: &Database,
+    channel_id: u64,
+    guild_id: u64,
+    mc_server_address: &str,
+) -> Result<(), StorageError> {
+    let wtxn = db.begin_write()?;
+    {
+        let mut table = wtxn.open_table(BRIDGE)?;
+        table.insert(CURRENT, (channel_id, guild_id, mc_server_address.to_string()))?;
     }
-
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &serialized).map_err(|e| StorageError::Io {
-        path: tmp.clone(),
-        source: e,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|e| StorageError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-
+    wtxn.commit()?;
     Ok(())
+}
+
+fn remove_bridge(db: &Database) -> Result<(), StorageError> {
+    let wtxn = db.begin_write()?;
+    {
+        let mut table = wtxn.open_table(BRIDGE)?;
+        table.remove(CURRENT)?;
+    }
+    wtxn.commit()?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn open_test_storage(path: &std::path::Path) -> Storage {
+    Storage::open(path.to_path_buf(), "localhost:25565".to_string())
+        .expect("failed to open test storage")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("ruze_test_{name}_{}.toml", std::process::id()))
+    fn temp_db_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("ruze_test_{name}_{}.redb", std::process::id()))
     }
 
-    #[test]
-    fn roundtrip_save_and_load() {
-        let path = temp_path("roundtrip");
-        let channels = vec![123, 456, 789];
+    #[tokio::test]
+    async fn get_returns_none_when_empty() {
+        let path = temp_db_path("empty");
+        let _ = std::fs::remove_file(&path);
+        let storage = open_test_storage(&path);
 
-        write_bridge_file(&path, &channels).unwrap();
-        let state = read_bridge_file(&path).unwrap();
+        let channel = storage.get_bridge_channel().await.expect("read failed");
+        assert!(channel.is_none());
 
         let _ = std::fs::remove_file(&path);
-        assert_eq!(state.bridged_channels, channels);
     }
 
-    #[test]
-    fn load_non_existent_returns_not_found() {
-        let path = PathBuf::from("/tmp/nonexistent_ruze_test_file_xyz123.toml");
-        let err = read_bridge_file(&path).unwrap_err();
-        match err {
-            StorageError::Io { source, .. } => {
-                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
-            }
-            _ => panic!("expected Io error, got {err:?}"),
-        }
-    }
-
-    #[test]
-    fn load_corrupt_file_returns_deserialize_error() {
-        let path = temp_path("corrupt");
-        std::fs::write(&path, "not valid toml {{{").unwrap();
-        let err = read_bridge_file(&path).unwrap_err();
+    #[tokio::test]
+    async fn set_then_get_roundtrip() {
+        let path = temp_db_path("roundtrip");
         let _ = std::fs::remove_file(&path);
-        assert!(matches!(err, StorageError::Deserialize(_)));
+        let storage = open_test_storage(&path);
+
+        storage
+            .set_bridge_channel(123, 456)
+            .await
+            .expect("write failed");
+
+        let channel = storage.get_bridge_channel().await.expect("read failed");
+        assert_eq!(channel, Some(serenity::ChannelId::new(123)));
+
+        let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn write_creates_parent_directories() {
+    #[tokio::test]
+    async fn clear_then_get_none() {
+        let path = temp_db_path("clear");
+        let _ = std::fs::remove_file(&path);
+        let storage = open_test_storage(&path);
+
+        storage
+            .set_bridge_channel(42, 99)
+            .await
+            .expect("write failed");
+        storage
+            .clear_bridge_channel()
+            .await
+            .expect("clear failed");
+
+        let channel = storage.get_bridge_channel().await.expect("read failed");
+        assert!(channel.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn set_overwrites_previous() {
+        let path = temp_db_path("overwrite");
+        let _ = std::fs::remove_file(&path);
+        let storage = open_test_storage(&path);
+
+        storage
+            .set_bridge_channel(100, 200)
+            .await
+            .expect("first write failed");
+        storage
+            .set_bridge_channel(300, 400)
+            .await
+            .expect("second write failed");
+
+        let channel = storage.get_bridge_channel().await.expect("read failed");
+        assert_eq!(channel, Some(serenity::ChannelId::new(300)));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn open_creates_parent_directories() {
         let dir = std::env::temp_dir().join(format!("ruze_test_dir_{}", std::process::id()));
-        let path = dir.join("sub").join("bridge.toml");
-
-        write_bridge_file(&path, &[42]).unwrap();
-
-        let exists = path.exists();
+        let path = dir.join("sub").join("ruze.redb");
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(exists);
-    }
 
-    #[test]
-    fn write_does_not_leave_temp_file() {
-        let path = temp_path("no_tmp");
-        let tmp = path.with_extension("tmp");
+        let storage = open_test_storage(&path);
+        let channel = storage.get_bridge_channel().await.expect("read failed");
+        assert!(channel.is_none());
 
-        write_bridge_file(&path, &[1, 2]).unwrap();
-
-        let tmp_exists = tmp.exists();
-        let _ = std::fs::remove_file(&path);
-        assert!(!tmp_exists);
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

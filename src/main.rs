@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use linemux::MuxedLines;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 use bot::types::{BotParams, FromDiscordEvent, FromMinecraftEvent};
@@ -70,8 +69,11 @@ async fn main() -> Result<(), bot::BotError> {
         }
     });
 
-    let rcon_client = rcon::connect(&config.rcon.address, &config.rcon.password)?;
-    let shared_rcon = Arc::new(Mutex::new(rcon_client));
+    let rcon_client = rcon::ReconnectingRcon::connect(
+        config.rcon.address.clone(),
+        config.rcon.password.clone(),
+    )?;
+    let shared_rcon = Arc::new(rcon_client);
 
     spawn_dc_to_mc_relay(dc_event_rx, Arc::clone(&shared_rcon));
 
@@ -128,7 +130,7 @@ fn parse_mc_address(raw: &str) -> url::Url {
 
 fn spawn_dc_to_mc_relay(
     mut dc_event_rx: mpsc::Receiver<FromDiscordEvent>,
-    rcon: Arc<Mutex<mc_rcon::RconClient>>,
+    rcon: Arc<rcon::ReconnectingRcon>,
 ) {
     tokio::spawn(async move {
         tracing::info!("Discord → Minecraft relay started");
@@ -153,8 +155,7 @@ fn spawn_dc_to_mc_relay(
             let formatted_command = format!(
                 r#"tellraw @a {{"text":"[Discord] <{safe_username}>: {safe_content}", "color":"gold"}}"#
             );
-            let guard = rcon.lock().await;
-            if let Err(why) = guard.send_command(&formatted_command) {
+            if let Err(why) = rcon.send_command(&formatted_command) {
                 tracing::warn!(
                     username = %event.username,
                     error = %why,

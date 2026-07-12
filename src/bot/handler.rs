@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mc_rcon::RconClient;
 use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::Mentionable;
 use rust_mc_status::McClient;
@@ -16,6 +15,7 @@ use super::BotError;
 use super::commands;
 use super::types::{BotParams, Data, FromDiscordEvent, FromMinecraftEvent};
 use crate::log_parser::is_silent_message_prefix;
+use crate::rcon::ReconnectingRcon;
 use crate::storage::Storage;
 
 async fn process_dc_mentions(content: &str, storage: &Storage) -> String {
@@ -121,7 +121,7 @@ pub async fn start_bot(
     mc_server_address: url::Url,
     mut mc_event_rx: Receiver<FromMinecraftEvent>,
     dc_event_tx: Sender<FromDiscordEvent>,
-    rcon_client: Arc<Mutex<RconClient>>,
+    rcon_client: Arc<ReconnectingRcon>,
     storage: Arc<Storage>,
 ) -> Result<(), BotError> {
     let intents =

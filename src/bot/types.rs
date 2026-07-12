@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use mc_rcon::RconClient;
 use poise::serenity_prelude as serenity;
 use rust_mc_status::McClient;
 use tokio::sync::{Mutex, RwLock, mpsc::Sender};
 
 use crate::log_parser::MinecraftEvent;
+use crate::rcon::ReconnectingRcon;
 use crate::storage::Storage;
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ pub struct Data {
     pub mc_status_client: McClient,
     pub bridge_channel: Arc<RwLock<Option<serenity::ChannelId>>>,
     pub storage: Arc<Storage>,
-    pub rcon_client: Arc<Mutex<RconClient>>,
+    pub rcon_client: Arc<ReconnectingRcon>,
     pub mc_server_address: url::Url,
     pub pending_verifications: Arc<Mutex<HashMap<String, PendingVerification>>>,
 }

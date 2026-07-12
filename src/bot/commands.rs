@@ -78,12 +78,10 @@ pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
         "command /info executed"
     );
 
-    let rcon_guard = ctx.data().rcon_client.lock().await;
-    let rcon_response = match rcon_guard.send_command("list") {
+    let rcon_response = match ctx.data().rcon_client.send_command("list") {
         Ok(res) => res,
         Err(e) => format!("Error executing RCON list: {e:?}"),
     };
-    drop(rcon_guard);
 
     let parsed_players = parse_player_list(&rcon_response);
 

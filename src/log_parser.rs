@@ -1,11 +1,18 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
+#[cfg(not(test))]
+use std::time::Instant;
 
 use regex::Regex;
 
 /// Tracks recent disconnects so the subsequent "left the game" can be suppressed.
 static RECENT_DISCONNECTS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Tracks the last server-stop event timestamp to suppress duplicates.
+#[cfg(not(test))]
+static LAST_SERVER_STOP: LazyLock<Mutex<Option<Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, PartialEq)]
 pub enum MinecraftEvent {
@@ -554,11 +561,33 @@ fn try_server_start(payload: &str) -> Option<MinecraftEvent> {
 
 fn try_server_stop(payload: &str) -> Option<MinecraftEvent> {
     if payload == "Stopping the server" || payload == "Stopping server" {
+        if try_dedup_server_stop() {
+            return None;
+        }
         tracing::warn!("server stopping detected");
         Some(MinecraftEvent::ServerStop)
     } else {
         None
     }
+}
+
+#[cfg(not(test))]
+fn try_dedup_server_stop() -> bool {
+    if let Ok(mut last) = LAST_SERVER_STOP.lock() {
+        if let Some(prev) = *last
+            && prev.elapsed().as_secs() < 5
+        {
+            tracing::debug!("suppressed duplicate server stop event");
+            return true;
+        }
+        *last = Some(Instant::now());
+    }
+    false
+}
+
+#[cfg(test)]
+fn try_dedup_server_stop() -> bool {
+    false
 }
 
 fn try_save_complete(payload: &str) -> Option<MinecraftEvent> {

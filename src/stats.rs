@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
 use chrono_tz::Tz;
-use mc_rcon::RconClient;
-use tokio::sync::{Mutex, mpsc::Receiver};
+use tokio::sync::mpsc::Receiver;
 use tokio::time::{Duration, interval};
 
 use crate::log_parser::StatsEvent;
+use crate::rcon::ReconnectingRcon;
 use crate::storage::{DailyTimeSplit, PlayerDelta, Storage};
 
 /// Accumulated deltas and session state for the stats tracker.
@@ -44,7 +44,7 @@ impl PendingState {
 pub struct StatsTracker {
     storage: Arc<Storage>,
     stats_rx: Receiver<StatsEvent>,
-    rcon: Arc<Mutex<RconClient>>,
+    rcon: Arc<ReconnectingRcon>,
     tz: Tz,
     state: PendingState,
 }
@@ -53,7 +53,7 @@ impl StatsTracker {
     pub fn new(
         storage: Arc<Storage>,
         stats_rx: Receiver<StatsEvent>,
-        rcon: Arc<Mutex<RconClient>>,
+        rcon: Arc<ReconnectingRcon>,
         tz: Tz,
     ) -> Self {
         Self {
@@ -254,8 +254,7 @@ impl StatsTracker {
             r#"tellraw @a {{"text":"[Stats] Welcome back {username}! Last login: {last_login_str}. Yesterday you played {yesterday_str}.","color":"gold"}}"#
         );
 
-        let guard = self.rcon.lock().await;
-        if let Err(e) = guard.send_command(&msg) {
+        if let Err(e) = self.rcon.send_command(&msg) {
             tracing::warn!(%e, %username, "failed to send login reminder via rcon");
         } else {
             tracing::info!(%username, last_login = %last_login_str, yesterday = %yesterday_str, "login reminder sent");
@@ -267,8 +266,7 @@ impl StatsTracker {
             r#"tellraw @a {{"text":"[Stats] Welcome {username}! This is your first login.","color":"green"}}"#
         );
 
-        let guard = self.rcon.lock().await;
-        if let Err(e) = guard.send_command(&msg) {
+        if let Err(e) = self.rcon.send_command(&msg) {
             tracing::warn!(%e, %username, "failed to send new player welcome via rcon");
         } else {
             tracing::info!(%username, "new player welcome sent");

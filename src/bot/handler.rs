@@ -168,6 +168,7 @@ pub async fn start_bot(
                 commands::sub(),
                 commands::mutemention(),
                 commands::unmutemention(),
+                commands::privacy(),
                 commands::help(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
@@ -281,7 +282,8 @@ pub async fn start_bot(
                 continue;
             }
 
-            if !event.mc_username.is_empty()
+            if storage_for_forward.is_privacy_enabled().await
+                && !event.mc_username.is_empty()
                 && let Some(dc_id) = storage_for_forward
                     .get_dc_from_mc(&event.mc_username)
                     .await
@@ -292,7 +294,9 @@ pub async fn start_bot(
 
             let is_chat = event.username == event.mc_username && !event.mc_username.is_empty();
 
-            let formatted_message = if is_chat {
+            let formatted_message = if is_chat
+                && storage_for_forward.is_privacy_enabled().await
+            {
                 let mention_content = process_mc_mentions(
                     &event.content,
                     &event.mc_username,
@@ -409,19 +413,22 @@ async fn event_handler(
 
             if should_relay && new_message.author.id != ctx.cache.current_user().id {
                 let author_id = new_message.author.id.get();
-                if !data.storage.is_connected_dc(author_id).await {
-                    tracing::debug!(
-                        user = %new_message.author.name,
-                        "not connected, skipping discord→mc"
-                    );
-                    return Ok(());
-                }
-                if data.storage.is_join_leave_opted_out(author_id).await {
-                    tracing::debug!(
-                        user = %new_message.author.name,
-                        "opted out, skipping discord→mc"
-                    );
-                    return Ok(());
+
+                if data.storage.is_privacy_enabled().await {
+                    if !data.storage.is_connected_dc(author_id).await {
+                        tracing::debug!(
+                            user = %new_message.author.name,
+                            "not connected, skipping discord→mc"
+                        );
+                        return Ok(());
+                    }
+                    if data.storage.is_join_leave_opted_out(author_id).await {
+                        tracing::debug!(
+                            user = %new_message.author.name,
+                            "opted out, skipping discord→mc"
+                        );
+                        return Ok(());
+                    }
                 }
 
                 let is_silent = is_silent_message_prefix(&new_message.content)
@@ -436,7 +443,11 @@ async fn event_handler(
                         "ignored silent discord→mc message"
                     );
                 } else {
-                    let content = process_dc_mentions(&new_message.content, &data.storage).await;
+                    let content = if data.storage.is_privacy_enabled().await {
+                        process_dc_mentions(&new_message.content, &data.storage).await
+                    } else {
+                        new_message.content.clone()
+                    };
                     data.dc_event_tx
                         .send(FromDiscordEvent {
                             username: new_message.author.name.clone(),

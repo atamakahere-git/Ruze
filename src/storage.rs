@@ -41,6 +41,10 @@ const JOIN_LEAVE_OPTOUT: TableDefinition<u64, bool> = TableDefinition::new("join
 /// Set of Discord user IDs who muted cross-chat mentions.
 const MUTE_MENTION: TableDefinition<u64, bool> = TableDefinition::new("mute_mention");
 
+/// Key-value settings table (e.g. privacy_enabled).
+const SETTINGS: TableDefinition<&str, bool> = TableDefinition::new("settings");
+const PRIVACY_ENABLED_KEY: &str = "privacy_enabled";
+
 /// (UUID, "YYYY-MM-DD") → seconds played that day (in configured timezone).
 pub const DAILY_PLAY_TIME: TableDefinition<(String, String), u64> =
     TableDefinition::new("daily_play_time");
@@ -156,6 +160,8 @@ pub struct Storage {
     join_leave_optout: Arc<RwLock<HashSet<u64>>>,
     /// Discord user IDs that muted cross-chat mentions.
     mute_mention: Arc<RwLock<HashSet<u64>>>,
+    /// Global privacy feature toggle (admin-controlled).
+    privacy_enabled: Arc<RwLock<bool>>,
 }
 
 impl Storage {
@@ -180,6 +186,7 @@ impl Storage {
         let (mc_usernames, discord_ids) = load_account_mappings(&db);
         let join_leave = load_optout_set(&db, JOIN_LEAVE_OPTOUT);
         let mute = load_optout_set(&db, MUTE_MENTION);
+        let privacy = load_privacy_enabled(&db);
 
         Ok(Self {
             db: Arc::new(db),
@@ -187,6 +194,7 @@ impl Storage {
             account_cache: Arc::new(RwLock::new((mc_usernames, discord_ids))),
             join_leave_optout: Arc::new(RwLock::new(join_leave)),
             mute_mention: Arc::new(RwLock::new(mute)),
+            privacy_enabled: Arc::new(RwLock::new(privacy)),
         })
     }
 
@@ -435,6 +443,31 @@ impl Storage {
         }
     }
 
+    /// Check whether privacy features (connection gating, /unsub filtering,
+    /// mention processing) are globally enabled.
+    ///
+    /// In-memory only — read on every hot-path event.
+    pub async fn is_privacy_enabled(&self) -> bool {
+        *self.privacy_enabled.read().await
+    }
+
+    /// Enable or disable all privacy features globally.
+    ///
+    /// Writes to both in-memory and redb.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on persistence failure.
+    pub async fn set_privacy_enabled(&self, enabled: bool) -> Result<(), StorageError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || write_privacy_setting(&db, enabled))
+            .await
+            .map_err(|e| StorageError::BlockingPanic(e.to_string()))??;
+
+        *self.privacy_enabled.write().await = enabled;
+        Ok(())
+    }
+
     /// Connect a Discord user ID to a Minecraft username (dual mapping).
     ///
     /// Returns `AlreadyClaimed` if the Minecraft username is already connected to
@@ -642,6 +675,23 @@ impl Storage {
     }
 }
 
+fn load_privacy_enabled(db: &Database) -> bool {
+    let rtxn = match db.begin_read() {
+        Ok(txn) => txn,
+        Err(_) => return true,
+    };
+
+    let table = match rtxn.open_table(SETTINGS) {
+        Ok(t) => t,
+        Err(_) => return true,
+    };
+
+    match table.get(PRIVACY_ENABLED_KEY) {
+        Ok(Some(g)) => g.value(),
+        _ => true,
+    }
+}
+
 fn load_account_mappings(db: &Database) -> (Vec<String>, Vec<u64>) {
     let mut mc_usernames: Vec<String> = Vec::new();
     let mut discord_ids: Vec<u64> = Vec::new();
@@ -744,6 +794,16 @@ fn write_optout_entry(
         } else {
             table.remove(user_id)?;
         }
+    }
+    wtxn.commit()?;
+    Ok(())
+}
+
+fn write_privacy_setting(db: &Database, enabled: bool) -> Result<(), StorageError> {
+    let wtxn = db.begin_write()?;
+    {
+        let mut table = wtxn.open_table(SETTINGS)?;
+        table.insert(PRIVACY_ENABLED_KEY, enabled)?;
     }
     wtxn.commit()?;
     Ok(())
@@ -954,6 +1014,7 @@ fn open_test_storage(path: &Path) -> Storage {
     let (mc_usernames, discord_ids) = load_account_mappings(&db);
     let join_leave = load_optout_set(&db, JOIN_LEAVE_OPTOUT);
     let mute = load_optout_set(&db, MUTE_MENTION);
+    let privacy = load_privacy_enabled(&db);
 
     Storage {
         db: Arc::new(db),
@@ -961,6 +1022,7 @@ fn open_test_storage(path: &Path) -> Storage {
         account_cache: Arc::new(RwLock::new((mc_usernames, discord_ids))),
         join_leave_optout: Arc::new(RwLock::new(join_leave)),
         mute_mention: Arc::new(RwLock::new(mute)),
+        privacy_enabled: Arc::new(RwLock::new(privacy)),
     }
 }
 

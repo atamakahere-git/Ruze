@@ -506,6 +506,11 @@ pub async fn connect(
         "command /connect executed"
     );
 
+    if !ctx.data().storage.is_privacy_enabled().await {
+        ctx.say("❌ Privacy features are currently disabled by the bot owner.").await?;
+        return Ok(());
+    }
+
     if ctx.data().storage.is_connected_dc(discord_id).await {
         ctx.say("❌ You are already connected to a Minecraft account. Use `/disconnect` first if you want to switch.".to_string())
             .await?;
@@ -592,6 +597,11 @@ pub async fn unsub(ctx: Context<'_>) -> Result<(), BotError> {
     let discord_id = ctx.author().id.get();
     tracing::info!(user = %ctx.author().name, discord_id = %discord_id, "command /unsub executed");
 
+    if !ctx.data().storage.is_privacy_enabled().await {
+        ctx.say("❌ Privacy features are currently disabled by the bot owner.").await?;
+        return Ok(());
+    }
+
     if !ctx.data().storage.is_connected_dc(discord_id).await {
         ctx.say("❌ You must `/connect` your Minecraft account first.").await?;
         return Ok(());
@@ -616,6 +626,11 @@ fn sub_help() -> String {
 pub async fn sub(ctx: Context<'_>) -> Result<(), BotError> {
     let discord_id = ctx.author().id.get();
     tracing::info!(user = %ctx.author().name, discord_id = %discord_id, "command /sub executed");
+
+    if !ctx.data().storage.is_privacy_enabled().await {
+        ctx.say("❌ Privacy features are currently disabled by the bot owner.").await?;
+        return Ok(());
+    }
 
     if !ctx.data().storage.is_connected_dc(discord_id).await {
         ctx.say("❌ You must `/connect` your Minecraft account first.").await?;
@@ -642,6 +657,11 @@ pub async fn mutemention(ctx: Context<'_>) -> Result<(), BotError> {
     let discord_id = ctx.author().id.get();
     tracing::info!(user = %ctx.author().name, discord_id = %discord_id, "command /mutemention executed");
 
+    if !ctx.data().storage.is_privacy_enabled().await {
+        ctx.say("❌ Privacy features are currently disabled by the bot owner.").await?;
+        return Ok(());
+    }
+
     if !ctx.data().storage.is_connected_dc(discord_id).await {
         ctx.say("❌ You must `/connect` your Minecraft account first.").await?;
         return Ok(());
@@ -664,6 +684,11 @@ pub async fn unmutemention(ctx: Context<'_>) -> Result<(), BotError> {
     let discord_id = ctx.author().id.get();
     tracing::info!(user = %ctx.author().name, discord_id = %discord_id, "command /unmutemention executed");
 
+    if !ctx.data().storage.is_privacy_enabled().await {
+        ctx.say("❌ Privacy features are currently disabled by the bot owner.").await?;
+        return Ok(());
+    }
+
     if !ctx.data().storage.is_connected_dc(discord_id).await {
         ctx.say("❌ You must `/connect` your Minecraft account first.").await?;
         return Ok(());
@@ -671,6 +696,51 @@ pub async fn unmutemention(ctx: Context<'_>) -> Result<(), BotError> {
 
     ctx.data().storage.set_mute_mention(discord_id, false).await?;
     ctx.say("🔔 You will be pinged when your Minecraft name is mentioned in chat.").await?;
+    Ok(())
+}
+
+/// Verify the command invoker is the bot owner only (not server admins).
+pub async fn is_owner(ctx: Context<'_>) -> Result<bool, BotError> {
+    if ctx.framework().options().owners.contains(&ctx.author().id) {
+        return Ok(true);
+    }
+    ctx.say("❌ **Access Denied:** This command is restricted to the Bot Owner.").await?;
+    Ok(false)
+}
+
+fn privacy_help() -> String {
+    String::from("Enable or disable all privacy features (connection gating, filtering, mentions).")
+}
+
+/// Enable or disable the privacy features globally.
+///
+/// Bot owner only.  When disabled the bridge runs as an open pipe in both
+/// directions; when enabled connected users can opt in/out and mentions work.
+#[poise::command(slash_command, prefix_command, help_text_fn = privacy_help, check = "is_owner")]
+pub async fn privacy(
+    ctx: Context<'_>,
+    #[description = "enable or disable"] action: Option<String>,
+) -> Result<(), BotError> {
+    let action = action.as_deref().unwrap_or("status");
+
+    match action.to_lowercase().as_str() {
+        "enable" | "on" => {
+            ctx.data().storage.set_privacy_enabled(true).await?;
+            tracing::info!(user = %ctx.author().name, "privacy features enabled");
+            ctx.say("🔒 **Privacy features enabled.**\n\nDC→MC requires /connect, MC→DC respects /unsub, and cross-chat mentions are active.").await?;
+        }
+        "disable" | "off" => {
+            ctx.data().storage.set_privacy_enabled(false).await?;
+            tracing::info!(user = %ctx.author().name, "privacy features disabled");
+            ctx.say("🔓 **Privacy features disabled.**\n\nThe bridge is an open pipe in both directions.").await?;
+        }
+        _ => {
+            let enabled = ctx.data().storage.is_privacy_enabled().await;
+            let status = if enabled { "🔒 enabled" } else { "🔓 disabled" };
+            ctx.say(format!("**Privacy features** are currently **{status}**.\n\nUse `/privacy enable` or `/privacy disable` to toggle.")).await?;
+        }
+    }
+
     Ok(())
 }
 
@@ -766,7 +836,11 @@ pub async fn help(ctx: Context<'_>, command_name: Option<String>) -> Result<(), 
         .fields(embed_fields)
         .thumbnail("https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExN3hja2kyZ3NqdXFxZHlzMWowNXdxcWtpMzA3aW9hNGVuNngwcDZ4OCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/IKFVtPf8jP6KJH16dB/giphy.gif");
 
-    if !ctx.data().storage.is_connected_dc(ctx.author().id.get()).await {
+    if !ctx.data().storage.is_privacy_enabled().await {
+        embed = embed.footer(serenity::CreateEmbedFooter::new(
+            "🔓 Privacy features are disabled by the bot owner. Connect/sub/mute commands have no effect.",
+        ));
+    } else if !ctx.data().storage.is_connected_dc(ctx.author().id.get()).await {
         embed = embed.footer(serenity::CreateEmbedFooter::new(
             "💡 Use /connect <mc-username> to link your account — required for your messages to reach Minecraft.",
         ));

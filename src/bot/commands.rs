@@ -581,6 +581,56 @@ pub async fn disconnect(ctx: Context<'_>) -> Result<(), BotError> {
     Ok(())
 }
 
+fn unsub_help() -> String {
+    String::from("Opt out — your Minecraft join/leave events will not be broadcast in the bridge.")
+}
+
+/// Stop broadcasting your Minecraft join/leave events in the Discord bridge.
+///
+/// You must `/connect` first.
+#[poise::command(slash_command, prefix_command, help_text_fn = unsub_help)]
+pub async fn unsub(ctx: Context<'_>) -> Result<(), BotError> {
+    let discord_id = ctx.author().id.get();
+    tracing::info!(user = %ctx.author().name, discord_id = %discord_id, "command /unsub executed");
+
+    if !ctx.data().storage.is_connected_dc(discord_id).await {
+        ctx.say("❌ You must `/connect` your Minecraft account first.").await?;
+        return Ok(());
+    }
+
+    ctx.data()
+        .storage
+        .set_join_leave_optout(discord_id, true)
+        .await?;
+    ctx.say("🔇 Your Minecraft join/leave events will no longer be broadcast in the bridge.").await?;
+    Ok(())
+}
+
+fn sub_help() -> String {
+    String::from("Re-enable broadcasting of your Minecraft join/leave events in the bridge.")
+}
+
+/// Resume broadcasting your Minecraft join/leave events in the Discord bridge.
+///
+/// You must `/connect` first.
+#[poise::command(slash_command, prefix_command, help_text_fn = sub_help)]
+pub async fn sub(ctx: Context<'_>) -> Result<(), BotError> {
+    let discord_id = ctx.author().id.get();
+    tracing::info!(user = %ctx.author().name, discord_id = %discord_id, "command /sub executed");
+
+    if !ctx.data().storage.is_connected_dc(discord_id).await {
+        ctx.say("❌ You must `/connect` your Minecraft account first.").await?;
+        return Ok(());
+    }
+
+    ctx.data()
+        .storage
+        .set_join_leave_optout(discord_id, false)
+        .await?;
+    ctx.say("🔊 Your Minecraft join/leave events will now be broadcast in the bridge.").await?;
+    Ok(())
+}
+
 /// Verify the command invoker is the bot owner or a server administrator.
 pub async fn is_owner_or_admin(ctx: Context<'_>) -> Result<bool, BotError> {
     if ctx.framework().options().owners.contains(&ctx.author().id) {

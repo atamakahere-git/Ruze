@@ -72,6 +72,8 @@ pub async fn start_bot(
                 commands::leaderboard(),
                 commands::connect(),
                 commands::disconnect(),
+                commands::unsub(),
+                commands::sub(),
                 commands::help(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
@@ -183,6 +185,18 @@ pub async fn start_bot(
                     });
                 }
                 continue;
+            }
+
+            let is_join_or_leave = event.username == "🟢" || event.username == "🔴";
+            if is_join_or_leave && !event.mc_username.is_empty() {
+                let dc_id = storage_for_forward
+                    .get_dc_from_mc(&event.mc_username)
+                    .await;
+                if let Some(dc_id) = dc_id
+                    && storage_for_forward.is_join_leave_opted_out(dc_id).await
+                {
+                    continue;
+                }
             }
 
             let formatted_message = format!("**{}**: {}", event.username, event.content);

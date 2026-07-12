@@ -14,6 +14,7 @@ use crate::storage::Storage;
 pub struct FromMinecraftEvent {
     pub username: String,
     pub content: String,
+    pub mc_username: String,
 }
 
 #[derive(Debug, Clone)]
@@ -53,24 +54,29 @@ impl MinecraftEvent {
     pub fn into_discord(self) -> Option<FromMinecraftEvent> {
         match self {
             Self::Chat { username, message } => Some(FromMinecraftEvent {
+                mc_username: username.clone(),
                 username,
                 content: message,
             }),
             Self::Join { username } => Some(into_bridge_event(
                 "🟢",
                 &format!("**{username}** joined the game"),
+                &username,
             )),
             Self::Leave { username } => Some(into_bridge_event(
                 "🔴",
                 &format!("**{username}** left the game"),
+                &username,
             )),
             Self::Disconnect { username, reason } => Some(into_bridge_event(
                 "🔴",
                 &format!("**{username}** left the game ({reason})"),
+                &username,
             )),
             Self::Death { username, message } => Some(into_bridge_event(
                 "⚰️",
                 &format!("**{username}** {message}"),
+                &username,
             )),
             Self::Advancement {
                 username,
@@ -78,25 +84,28 @@ impl MinecraftEvent {
             } => Some(into_bridge_event(
                 "🏆",
                 &format!("**{username}** has made the advancement [{advancement}]"),
+                &username,
             )),
             Self::Command { username, command } => Some(into_bridge_event(
                 "⌨️",
                 &format!("**{username}** used command: `{command}`"),
+                &username,
             )),
             Self::ServerSay { message } => {
-                Some(into_bridge_event("📢", &format!("[Server] {message}")))
+                Some(into_bridge_event("📢", &format!("[Server] {message}"), ""))
             }
-            Self::ServerStart => Some(into_bridge_event("🚀", "Server started!")),
-            Self::ServerStop => Some(into_bridge_event("🛑", "Server stopped!")),
-            Self::SaveComplete => Some(into_bridge_event("💾", "World saved!")),
+            Self::ServerStart => Some(into_bridge_event("🚀", "Server started!", "")),
+            Self::ServerStop => Some(into_bridge_event("🛑", "Server stopped!", "")),
+            Self::SaveComplete => Some(into_bridge_event("💾", "World saved!", "")),
             Self::PlayerList { .. } | Self::UuidResolved { .. } => None,
         }
     }
 }
 
-fn into_bridge_event(username: &str, content: &str) -> FromMinecraftEvent {
+fn into_bridge_event(username: &str, content: &str, mc_username: &str) -> FromMinecraftEvent {
     FromMinecraftEvent {
         username: username.to_owned(),
         content: content.to_owned(),
+        mc_username: mc_username.to_owned(),
     }
 }

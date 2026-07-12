@@ -23,7 +23,7 @@ async fn process_dc_mentions(content: &str, storage: &Storage) -> String {
         return content.to_string();
     }
 
-    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let mut candidates: Vec<(usize, usize, u64)> = Vec::new();
     let bytes = content.as_bytes();
     let mut i = 0;
 
@@ -47,11 +47,24 @@ async fn process_dc_mentions(content: &str, storage: &Storage) -> String {
         if i > num_start && i < bytes.len() && bytes[i] == b'>' {
             i += 1;
             let id_str = std::str::from_utf8(&bytes[num_start..i - 1]).unwrap_or("");
-            if let Ok(user_id) = id_str.parse::<u64>()
-                && let Some(mc_name) = storage.get_mc_from_dc(user_id).await
-            {
-                replacements.push((start, i, format!("@{mc_name}")));
+            if let Ok(user_id) = id_str.parse::<u64>() {
+                candidates.push((start, i, user_id));
             }
+        }
+    }
+
+    let mut cache: Vec<(u64, Option<String>)> = Vec::new();
+    for &(_, _, user_id) in &candidates {
+        if !cache.iter().any(|(id, _)| *id == user_id) {
+            let mc_name = storage.get_mc_from_dc(user_id).await;
+            cache.push((user_id, mc_name));
+        }
+    }
+
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    for (s, e, user_id) in &candidates {
+        if let Some((_, Some(name))) = cache.iter().find(|(id, _)| id == user_id) {
+            replacements.push((*s, *e, format!("@{name}")));
         }
     }
 
@@ -64,7 +77,7 @@ async fn process_dc_mentions(content: &str, storage: &Storage) -> String {
 }
 
 async fn process_mc_mentions(content: &str, sender_mc: &str, storage: &Storage) -> String {
-    let mut replacements: Vec<(usize, usize, u64)> = Vec::new();
+    let mut candidates: Vec<(usize, usize, &str)> = Vec::new();
     let bytes = content.as_bytes();
     let mut word_start: Option<usize> = None;
 
@@ -78,11 +91,8 @@ async fn process_mc_mentions(content: &str, sender_mc: &str, storage: &Storage) 
             let len = i - s;
             if (3..=16).contains(&len) {
                 let word = &content[s..i];
-                if word != sender_mc
-                    && let Some(dc_id) = storage.get_dc_from_mc(word).await
-                    && !storage.is_mention_muted(dc_id).await
-                {
-                    replacements.push((s, i, dc_id));
+                if word != sender_mc {
+                    candidates.push((s, i, word));
                 }
             }
             word_start = None;
@@ -93,12 +103,30 @@ async fn process_mc_mentions(content: &str, sender_mc: &str, storage: &Storage) 
         let len = content.len() - s;
         if (3..=16).contains(&len) {
             let word = &content[s..];
-            if word != sender_mc
-                && let Some(dc_id) = storage.get_dc_from_mc(word).await
-                && !storage.is_mention_muted(dc_id).await
-            {
-                replacements.push((s, content.len(), dc_id));
+            if word != sender_mc {
+                candidates.push((s, content.len(), word));
             }
+        }
+    }
+
+    let mut cache: Vec<(&str, Option<u64>)> = Vec::new();
+    for &(_, _, word) in &candidates {
+        if !cache.iter().any(|(w, _)| *w == word) {
+            let dc_id = if let Some(id) = storage.get_dc_from_mc(word).await
+                && !storage.is_mention_muted(id).await
+            {
+                Some(id)
+            } else {
+                None
+            };
+            cache.push((word, dc_id));
+        }
+    }
+
+    let mut replacements: Vec<(usize, usize, u64)> = Vec::new();
+    for (s, e, word) in &candidates {
+        if let Some((_, Some(id))) = cache.iter().find(|(w, _)| *w == *word) {
+            replacements.push((*s, *e, *id));
         }
     }
 
@@ -310,7 +338,9 @@ pub async fn start_bot(
                 continue;
             }
 
-            if storage_for_forward.is_privacy_enabled().await
+            let privacy_enabled = storage_for_forward.is_privacy_enabled().await;
+
+            if privacy_enabled
                 && !event.mc_username.is_empty()
                 && let Some(dc_id) = storage_for_forward
                     .get_dc_from_mc(&event.mc_username)
@@ -322,8 +352,7 @@ pub async fn start_bot(
 
             let is_chat = event.username == event.mc_username && !event.mc_username.is_empty();
 
-            let formatted_message = if is_chat
-                && storage_for_forward.is_privacy_enabled().await
+            let formatted_message = if is_chat && privacy_enabled
             {
                 let mention_content = process_mc_mentions(
                     &event.content,
@@ -379,6 +408,7 @@ pub async fn start_bot(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn event_handler(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -441,8 +471,9 @@ async fn event_handler(
 
             if should_relay && new_message.author.id != ctx.cache.current_user().id {
                 let author_id = new_message.author.id.get();
+                let privacy_enabled = data.storage.is_privacy_enabled().await;
 
-                if data.storage.is_privacy_enabled().await {
+                if privacy_enabled {
                     if !data.storage.is_connected_dc(author_id).await {
                         tracing::debug!(
                             user = %new_message.author.name,
@@ -471,7 +502,7 @@ async fn event_handler(
                         "ignored silent discord→mc message"
                     );
                 } else {
-                    let content = if data.storage.is_privacy_enabled().await {
+                    let content = if privacy_enabled {
                         process_dc_mentions(&new_message.content, &data.storage).await
                     } else {
                         new_message.content.clone()

@@ -41,7 +41,7 @@ const JOIN_LEAVE_OPTOUT: TableDefinition<u64, bool> = TableDefinition::new("join
 /// Set of Discord user IDs who muted cross-chat mentions.
 const MUTE_MENTION: TableDefinition<u64, bool> = TableDefinition::new("mute_mention");
 
-/// Key-value settings table (e.g. privacy_enabled).
+/// Key-value settings table (e.g. `privacy_enabled`).
 const SETTINGS: TableDefinition<&str, bool> = TableDefinition::new("settings");
 const PRIVACY_ENABLED_KEY: &str = "privacy_enabled";
 
@@ -676,14 +676,12 @@ impl Storage {
 }
 
 fn load_privacy_enabled(db: &Database) -> bool {
-    let rtxn = match db.begin_read() {
-        Ok(txn) => txn,
-        Err(_) => return true,
+    let Ok(rtxn) = db.begin_read() else {
+        return true;
     };
 
-    let table = match rtxn.open_table(SETTINGS) {
-        Ok(t) => t,
-        Err(_) => return true,
+    let Ok(table) = rtxn.open_table(SETTINGS) else {
+        return true;
     };
 
     match table.get(PRIVACY_ENABLED_KEY) {
@@ -696,14 +694,12 @@ fn load_account_mappings(db: &Database) -> (Vec<String>, Vec<u64>) {
     let mut mc_usernames: Vec<String> = Vec::new();
     let mut discord_ids: Vec<u64> = Vec::new();
 
-    let rtxn = match db.begin_read() {
-        Ok(txn) => txn,
-        Err(_) => return (mc_usernames, discord_ids),
+    let Ok(rtxn) = db.begin_read() else {
+        return (mc_usernames, discord_ids);
     };
 
-    let table = match rtxn.open_table(DC_TO_MC) {
-        Ok(t) => t,
-        Err(_) => return (mc_usernames, discord_ids),
+    let Ok(table) = rtxn.open_table(DC_TO_MC) else {
+        return (mc_usernames, discord_ids);
     };
 
     let mut pairs: Vec<(String, u64)> = Vec::new();
@@ -725,14 +721,12 @@ fn load_account_mappings(db: &Database) -> (Vec<String>, Vec<u64>) {
 fn load_optout_set(db: &Database, table_def: TableDefinition<u64, bool>) -> HashSet<u64> {
     let mut set = HashSet::new();
 
-    let rtxn = match db.begin_read() {
-        Ok(txn) => txn,
-        Err(_) => return set,
+    let Ok(rtxn) = db.begin_read() else {
+        return set;
     };
 
-    let table = match rtxn.open_table(table_def) {
-        Ok(t) => t,
-        Err(_) => return set,
+    let Ok(table) = rtxn.open_table(table_def) else {
+        return set;
     };
 
     if let Ok(iter) = table.iter() {

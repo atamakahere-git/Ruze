@@ -141,10 +141,9 @@ impl StatsTracker {
         delta.is_new_player = existing.is_none();
 
         if let Some(stats) = &existing {
-            self.send_login_reminder(username, stats.last_login_ts)
-                .await;
+            self.send_login_reminder(username, stats.last_login_ts);
         } else {
-            self.send_new_player_welcome(username).await;
+            self.send_new_player_welcome(username);
         }
     }
 
@@ -226,7 +225,7 @@ impl StatsTracker {
         }
     }
 
-    async fn send_login_reminder(&self, username: &str, last_login_ts: i64) {
+    fn send_login_reminder(&self, username: &str, last_login_ts: i64) {
         let last_login_str = if last_login_ts > 0 {
             let dt = self.tz.timestamp_opt(last_login_ts, 0).single();
             dt.map_or("unknown".to_string(), |dt| {
@@ -243,20 +242,20 @@ impl StatsTracker {
         };
 
         let uuid = self.state.resolve_uuid(username);
-        let yesterday_secs = self
-            .storage
-            .get_daily_play_time(uuid, yesterday_date.clone())
-            .await
-            .unwrap_or(0);
-
-let yesterday_str = format_duration(yesterday_secs);
-        let msg = format!(
-            r#"tellraw @a {{"text":"[Stats] Welcome back {username}! Last login: {last_login_str}. Yesterday you played {yesterday_str}.","color":"gold"}}"#
-        );
-
+        let storage = Arc::clone(&self.storage);
         let rcon = Arc::clone(&self.rcon);
         let user = username.to_string();
         tokio::spawn(async move {
+            let yesterday_secs = storage
+                .get_daily_play_time(uuid, yesterday_date)
+                .await
+                .unwrap_or(0);
+
+            let yesterday_str = format_duration(yesterday_secs);
+            let msg = format!(
+                r#"tellraw @a {{"text":"[Stats] Welcome back {user}! Last login: {last_login_str}. Yesterday you played {yesterday_str}.","color":"gold"}}"#
+            );
+
             match tokio::time::timeout(
                 Duration::from_secs(5),
                 rcon.send_command(msg),
@@ -270,7 +269,7 @@ let yesterday_str = format_duration(yesterday_secs);
         });
     }
 
-    async fn send_new_player_welcome(&self, username: &str) {
+    fn send_new_player_welcome(&self, username: &str) {
         let msg = format!(
             r#"tellraw @a {{"text":"[Stats] Welcome {username}! This is your first login.","color":"green"}}"#
         );

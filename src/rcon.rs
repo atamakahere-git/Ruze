@@ -66,7 +66,7 @@ impl ReconnectingRcon {
     /// Synchronous send with automatic reconnection on failure.
     fn send_command_sync(&self, command: &str) -> Result<String, RconError> {
         {
-            let guard = self.client.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self.client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref client) = *guard {
                 match client.send_command(command) {
                     Ok(result) => return Ok(result),
@@ -89,7 +89,7 @@ impl ReconnectingRcon {
                 let mut guard = self
                     .client
                     .lock()
-                    .unwrap_or_else(|p| p.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let result = new_client.send_command(command);
                 *guard = Some(new_client);
                 tracing::info!("RCON reconnected successfully");
@@ -99,7 +99,7 @@ impl ReconnectingRcon {
                 let mut guard = self
                     .client
                     .lock()
-                    .unwrap_or_else(|p| p.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *guard = None;
                 tracing::error!(%e, "RCON reconnection failed");
                 Err(e)
@@ -112,7 +112,7 @@ impl ReconnectingRcon {
         let mut guard = self
             .last_connect_attempt
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
         let allow = guard.is_none_or(|t| now.duration_since(t) >= RECONNECT_COOLDOWN);
         if allow {

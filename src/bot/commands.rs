@@ -474,7 +474,7 @@ pub async fn leaderboard(ctx: Context<'_>) -> Result<(), BotError> {
 
 fn generate_verification_code() -> String {
     let value: u64 = rand::random();
-    format!("{:016X}", value)
+    format!("{value:016X}")
 }
 
 fn is_valid_mc_username(name: &str) -> bool {

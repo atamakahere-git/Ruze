@@ -18,6 +18,98 @@ use super::types::{BotParams, Data, FromDiscordEvent, FromMinecraftEvent};
 use crate::log_parser::is_silent_message_prefix;
 use crate::storage::Storage;
 
+async fn process_dc_mentions(content: &str, storage: &Storage) -> String {
+    if !content.contains("<@") {
+        return content.to_string();
+    }
+
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let bytes = content.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len().saturating_sub(2) {
+        if bytes[i] != b'<' || bytes[i + 1] != b'@' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 2;
+
+        if i < bytes.len() && bytes[i] == b'!' {
+            i += 1;
+        }
+
+        let num_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+
+        if i > num_start && i < bytes.len() && bytes[i] == b'>' {
+            i += 1;
+            let id_str = std::str::from_utf8(&bytes[num_start..i - 1]).unwrap_or("");
+            if let Ok(user_id) = id_str.parse::<u64>()
+                && let Some(mc_name) = storage.get_mc_from_dc(user_id).await
+            {
+                replacements.push((start, i, format!("@{mc_name}")));
+            }
+        }
+    }
+
+    let mut result = content.to_string();
+    for (s, e, replacement) in replacements.into_iter().rev() {
+        result.replace_range(s..e, &replacement);
+    }
+
+    result
+}
+
+async fn process_mc_mentions(content: &str, sender_mc: &str, storage: &Storage) -> String {
+    let mut replacements: Vec<(usize, usize, u64)> = Vec::new();
+    let bytes = content.as_bytes();
+    let mut word_start: Option<usize> = None;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        let is_word_char = b.is_ascii_alphanumeric() || b == b'_';
+        if is_word_char && word_start.is_none() {
+            word_start = Some(i);
+        } else if !is_word_char
+            && let Some(s) = word_start
+        {
+            let len = i - s;
+            if (3..=16).contains(&len) {
+                let word = &content[s..i];
+                if word != sender_mc
+                    && let Some(dc_id) = storage.get_dc_from_mc(word).await
+                    && !storage.is_mention_muted(dc_id).await
+                {
+                    replacements.push((s, i, dc_id));
+                }
+            }
+            word_start = None;
+        }
+    }
+
+    if let Some(s) = word_start {
+        let len = content.len() - s;
+        if (3..=16).contains(&len) {
+            let word = &content[s..];
+            if word != sender_mc
+                && let Some(dc_id) = storage.get_dc_from_mc(word).await
+                && !storage.is_mention_muted(dc_id).await
+            {
+                replacements.push((s, content.len(), dc_id));
+            }
+        }
+    }
+
+    let mut result = content.to_string();
+    for (s, e, dc_id) in replacements.into_iter().rev() {
+        result.replace_range(s..e, &format!("<@{dc_id}>"));
+    }
+
+    result
+}
+
 /// Start the Discord bot, register commands, and begin dispatching events.
 ///
 /// # Errors
@@ -74,6 +166,8 @@ pub async fn start_bot(
                 commands::disconnect(),
                 commands::unsub(),
                 commands::sub(),
+                commands::mutemention(),
+                commands::unmutemention(),
                 commands::help(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
@@ -199,7 +293,19 @@ pub async fn start_bot(
                 }
             }
 
-            let formatted_message = format!("**{}**: {}", event.username, event.content);
+            let is_chat = event.username == event.mc_username && !event.mc_username.is_empty();
+
+            let formatted_message = if is_chat {
+                let mention_content = process_mc_mentions(
+                    &event.content,
+                    &event.mc_username,
+                    &storage_for_forward,
+                )
+                .await;
+                format!("**{}**: {}", event.username, mention_content)
+            } else {
+                format!("**{}**: {}", event.username, event.content)
+            };
 
             let http_clone = Arc::clone(&cache_http_for_forward);
             let msg = formatted_message.clone();
@@ -317,10 +423,11 @@ async fn event_handler(
                         "ignored silent discord→mc message"
                     );
                 } else {
+                    let content = process_dc_mentions(&new_message.content, &data.storage).await;
                     data.dc_event_tx
                         .send(FromDiscordEvent {
                             username: new_message.author.name.clone(),
-                            content: new_message.content.clone(),
+                            content,
                         })
                         .await
                         .inspect_err(|e| {

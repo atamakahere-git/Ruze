@@ -631,6 +631,50 @@ pub async fn sub(ctx: Context<'_>) -> Result<(), BotError> {
     Ok(())
 }
 
+fn mutemention_help() -> String {
+    String::from("Mute cross-chat mentions — you won't be pinged when your MC name is mentioned in chat.")
+}
+
+/// Mute cross-chat mention pings — you won't be pinged in Discord when your MC name is mentioned.
+///
+/// Requires `/connect` first.
+#[poise::command(slash_command, prefix_command, help_text_fn = mutemention_help)]
+pub async fn mutemention(ctx: Context<'_>) -> Result<(), BotError> {
+    let discord_id = ctx.author().id.get();
+    tracing::info!(user = %ctx.author().name, discord_id = %discord_id, "command /mutemention executed");
+
+    if !ctx.data().storage.is_connected_dc(discord_id).await {
+        ctx.say("❌ You must `/connect` your Minecraft account first.").await?;
+        return Ok(());
+    }
+
+    ctx.data().storage.set_mute_mention(discord_id, true).await?;
+    ctx.say("🔕 You will not be pinged when your Minecraft name is mentioned in chat.").await?;
+    Ok(())
+}
+
+fn unmutemention_help() -> String {
+    String::from("Re-enable cross-chat mention pings.")
+}
+
+/// Re-enable cross-chat mention pings — you will be pinged when your MC name is mentioned.
+///
+/// Requires `/connect` first.
+#[poise::command(slash_command, prefix_command, help_text_fn = unmutemention_help)]
+pub async fn unmutemention(ctx: Context<'_>) -> Result<(), BotError> {
+    let discord_id = ctx.author().id.get();
+    tracing::info!(user = %ctx.author().name, discord_id = %discord_id, "command /unmutemention executed");
+
+    if !ctx.data().storage.is_connected_dc(discord_id).await {
+        ctx.say("❌ You must `/connect` your Minecraft account first.").await?;
+        return Ok(());
+    }
+
+    ctx.data().storage.set_mute_mention(discord_id, false).await?;
+    ctx.say("🔔 You will be pinged when your Minecraft name is mentioned in chat.").await?;
+    Ok(())
+}
+
 /// Verify the command invoker is the bot owner or a server administrator.
 pub async fn is_owner_or_admin(ctx: Context<'_>) -> Result<bool, BotError> {
     if ctx.framework().options().owners.contains(&ctx.author().id) {
@@ -716,15 +760,22 @@ pub async fn help(ctx: Context<'_>, command_name: Option<String>) -> Result<(), 
         })
         .collect();
 
-    let embed = serenity::CreateEmbed::new()
+    let mut embed = serenity::CreateEmbed::new()
         .title("💥 Hello! こんにちは！~\n\n")
         .description("Here's a list of all the commands you can use:")
         .color(0x34_98db)
         .fields(embed_fields)
-        .footer(serenity::CreateEmbedFooter::new(
-            "Use ~command or \"hey reze, command\" to use any of these commands",
-        ))
         .thumbnail("https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExN3hja2kyZ3NqdXFxZHlzMWowNXdxcWtpMzA3aW9hNGVuNngwcDZ4OCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/IKFVtPf8jP6KJH16dB/giphy.gif");
+
+    if !ctx.data().storage.is_connected_dc(ctx.author().id.get()).await {
+        embed = embed.footer(serenity::CreateEmbedFooter::new(
+            "💡 Use /connect <mc-username> to link your account and enable mentions!",
+        ));
+    } else {
+        embed = embed.footer(serenity::CreateEmbedFooter::new(
+            "Use ~command or \"hey reze, command\" to use any of these commands",
+        ));
+    }
 
     ctx.send(poise::CreateReply::default().embed(embed)).await?;
     Ok(())

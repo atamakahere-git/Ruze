@@ -281,16 +281,13 @@ pub async fn start_bot(
                 continue;
             }
 
-            let is_join_or_leave = event.username == "🟢" || event.username == "🔴";
-            if is_join_or_leave && !event.mc_username.is_empty() {
-                let dc_id = storage_for_forward
+            if !event.mc_username.is_empty()
+                && let Some(dc_id) = storage_for_forward
                     .get_dc_from_mc(&event.mc_username)
-                    .await;
-                if let Some(dc_id) = dc_id
-                    && storage_for_forward.is_join_leave_opted_out(dc_id).await
-                {
-                    continue;
-                }
+                    .await
+                && storage_for_forward.is_join_leave_opted_out(dc_id).await
+            {
+                continue;
             }
 
             let is_chat = event.username == event.mc_username && !event.mc_username.is_empty();
@@ -411,6 +408,22 @@ async fn event_handler(
             };
 
             if should_relay && new_message.author.id != ctx.cache.current_user().id {
+                let author_id = new_message.author.id.get();
+                if !data.storage.is_connected_dc(author_id).await {
+                    tracing::debug!(
+                        user = %new_message.author.name,
+                        "not connected, skipping discord→mc"
+                    );
+                    return Ok(());
+                }
+                if data.storage.is_join_leave_opted_out(author_id).await {
+                    tracing::debug!(
+                        user = %new_message.author.name,
+                        "opted out, skipping discord→mc"
+                    );
+                    return Ok(());
+                }
+
                 let is_silent = is_silent_message_prefix(&new_message.content)
                     || new_message.flags.is_some_and(|f| {
                         f.contains(serenity::MessageFlags::SUPPRESS_NOTIFICATIONS)

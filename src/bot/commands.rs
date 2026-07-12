@@ -580,12 +580,13 @@ pub async fn disconnect(ctx: Context<'_>) -> Result<(), BotError> {
 }
 
 fn unsub_help() -> String {
-    String::from("Opt out — your Minecraft join/leave events will not be broadcast in the bridge.")
+    String::from("Opt out — your Minecraft activity will not be broadcast, and your Discord messages will not reach Minecraft.")
 }
 
-/// Stop broadcasting your Minecraft join/leave events in the Discord bridge.
+/// Stop bridging your Minecraft activity to Discord and your Discord messages to Minecraft.
 ///
-/// You must `/connect` first.
+/// You must `/connect` first.  This silences all MC→DC events (chat, join/leave,
+/// deaths, advancements, commands) and blocks your Discord messages from reaching MC.
 #[poise::command(slash_command, prefix_command, help_text_fn = unsub_help)]
 pub async fn unsub(ctx: Context<'_>) -> Result<(), BotError> {
     let discord_id = ctx.author().id.get();
@@ -600,15 +601,15 @@ pub async fn unsub(ctx: Context<'_>) -> Result<(), BotError> {
         .storage
         .set_join_leave_optout(discord_id, true)
         .await?;
-    ctx.say("🔇 Your Minecraft join/leave events will no longer be broadcast in the bridge.").await?;
+    ctx.say("🔇 Your Minecraft activity will no longer be broadcast in the bridge, and your Discord messages will not be relayed to Minecraft.").await?;
     Ok(())
 }
 
 fn sub_help() -> String {
-    String::from("Re-enable broadcasting of your Minecraft join/leave events in the bridge.")
+    String::from("Re-enable bridging — your Minecraft activity and Discord messages will flow both ways again.")
 }
 
-/// Resume broadcasting your Minecraft join/leave events in the Discord bridge.
+/// Resume bridging your Minecraft activity to Discord and your Discord messages to Minecraft.
 ///
 /// You must `/connect` first.
 #[poise::command(slash_command, prefix_command, help_text_fn = sub_help)]
@@ -625,7 +626,7 @@ pub async fn sub(ctx: Context<'_>) -> Result<(), BotError> {
         .storage
         .set_join_leave_optout(discord_id, false)
         .await?;
-    ctx.say("🔊 Your Minecraft join/leave events will now be broadcast in the bridge.").await?;
+    ctx.say("🔊 Your Minecraft activity will now be broadcast in the bridge, and your Discord messages will be relayed to Minecraft.").await?;
     Ok(())
 }
 
@@ -767,7 +768,7 @@ pub async fn help(ctx: Context<'_>, command_name: Option<String>) -> Result<(), 
 
     if !ctx.data().storage.is_connected_dc(ctx.author().id.get()).await {
         embed = embed.footer(serenity::CreateEmbedFooter::new(
-            "💡 Use /connect <mc-username> to link your account and enable mentions!",
+            "💡 Use /connect <mc-username> to link your account — required for your messages to reach Minecraft.",
         ));
     } else {
         embed = embed.footer(serenity::CreateEmbedFooter::new(

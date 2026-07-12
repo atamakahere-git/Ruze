@@ -1,4 +1,6 @@
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use mc_rcon::RconClient;
 use poise::serenity_prelude as serenity;
@@ -9,6 +11,7 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
 };
 
+use super::types::PendingVerification;
 use super::BotError;
 use super::commands;
 use super::types::{BotParams, Data, FromDiscordEvent, FromMinecraftEvent};
@@ -41,6 +44,12 @@ pub async fn start_bot(
     let bridge_channel_clone = Arc::clone(&bridge_channel);
     let storage_for_forward = Arc::clone(&storage);
 
+    let pending_verifications: Arc<Mutex<HashMap<String, PendingVerification>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let pv_for_data = Arc::clone(&pending_verifications);
+    let pv_for_forward = Arc::clone(&pending_verifications);
+    let pv_for_cleanup = Arc::clone(&pending_verifications);
+
     let mc_status_client = McClient::new()
         .with_timeout(Duration::from_secs(5))
         .with_max_parallel(10);
@@ -61,6 +70,8 @@ pub async fn start_bot(
                 commands::stats(),
                 commands::playtime(),
                 commands::leaderboard(),
+                commands::connect(),
+                commands::disconnect(),
                 commands::help(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
@@ -96,6 +107,7 @@ pub async fn start_bot(
                     storage: storage.clone(),
                     rcon_client,
                     mc_server_address: addr,
+                    pending_verifications: pv_for_data.clone(),
                 })
             })
         })
@@ -105,10 +117,10 @@ pub async fn start_bot(
     let mut client = client_builder.await?;
     let cache_http = Arc::clone(&client.http);
 
+    let cache_http_for_forward = Arc::clone(&cache_http);
+
     tokio::spawn(async move {
         while let Some(event) = mc_event_rx.recv().await {
-            let formatted_message = format!("**{}**: {}", event.username, event.content);
-
             let target_channel = {
                 let guard = bridge_channel_clone.read().await;
                 *guard
@@ -118,7 +130,64 @@ pub async fn start_bot(
                 continue;
             };
 
-            let http_clone = Arc::clone(&cache_http);
+            if let Some(code) = event.content.strip_prefix("@s CONFIRM-")
+                .or_else(|| event.content.strip_prefix("@S CONFIRM-"))
+                .or_else(|| event.content.strip_prefix("@s confirm-"))
+                .or_else(|| event.content.strip_prefix("@S confirm-"))
+            {
+                let code = code.trim().to_string();
+                let mut guard = pv_for_forward.lock().await;
+                let maybe_pending = guard.remove(&code);
+                drop(guard);
+
+                if let Some(pending) = maybe_pending {
+                    if pending.mc_username != event.username {
+                        continue;
+                    }
+                    if pending.expires_at <= Instant::now() {
+                        let http = Arc::clone(&cache_http_for_forward);
+                        let _ = target_channel
+                            .say(
+                                http,
+                                format!(
+                                    "⏰ <@{}> Verification for `{}` expired (took more than 30 seconds). Use `/connect` again.",
+                                    pending.discord_user_id, pending.mc_username
+                                ),
+                            )
+                            .await;
+                        continue;
+                    }
+                    let http = Arc::clone(&cache_http_for_forward);
+                    let storage = Arc::clone(&storage_for_forward);
+                    let mc = pending.mc_username.clone();
+                    let dc = pending.discord_user_id;
+                    tokio::spawn(async move {
+                        if let Err(e) = storage.set_connection(dc, mc.clone()).await {
+                            tracing::error!(%e, "failed to persist account connection");
+                            let _ = target_channel
+                                .say(
+                                    http,
+                                    format!("❌ <@{dc}> Failed to save connection. Please try again."),
+                                )
+                                .await;
+                        } else {
+                            let _ = target_channel
+                                .say(
+                                    http,
+                                    format!(
+                                        "✅ <@{dc}> Connected! Your Minecraft account **{mc}** is now linked."
+                                    ),
+                                )
+                                .await;
+                        }
+                    });
+                }
+                continue;
+            }
+
+            let formatted_message = format!("**{}**: {}", event.username, event.content);
+
+            let http_clone = Arc::clone(&cache_http_for_forward);
             let msg = formatted_message.clone();
             let bridge_ref = Arc::clone(&bridge_channel_clone);
             let storage_ref = Arc::clone(&storage_for_forward);
@@ -146,6 +215,14 @@ pub async fn start_bot(
                     }
                 }
             });
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let mut guard = pv_for_cleanup.lock().await;
+            guard.retain(|_, v| v.expires_at > Instant::now());
         }
     });
 

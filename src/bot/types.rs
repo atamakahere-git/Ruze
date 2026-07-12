@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use mc_rcon::RconClient;
 use poise::serenity_prelude as serenity;
@@ -20,6 +22,14 @@ pub struct FromDiscordEvent {
     pub content: String,
 }
 
+#[derive(Debug)]
+pub struct PendingVerification {
+    pub discord_user_id: u64,
+    pub mc_username: String,
+    pub code: String,
+    pub expires_at: Instant,
+}
+
 /// Bot configuration fields that are consumed once during startup.
 pub struct BotParams {
     pub token: String,
@@ -35,6 +45,7 @@ pub struct Data {
     pub storage: Arc<Storage>,
     pub rcon_client: Arc<Mutex<RconClient>>,
     pub mc_server_address: url::Url,
+    pub pending_verifications: Arc<Mutex<HashMap<String, PendingVerification>>>,
 }
 
 impl MinecraftEvent {

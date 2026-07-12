@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use tokio::sync::RwLock;
 
 /// Single-row bridge binding table.
 ///
@@ -26,6 +28,18 @@ pub const PLAYERS: TableDefinition<String, PlayerStatsTuple> = TableDefinition::
 
 /// Tuple type for the `PLAYERS` table value, factored out for readability.
 type PlayerStatsTuple = (u64, i64, i64, i64, u64, u64, u64, u64, u64);
+
+/// Discord user ID → Minecraft username mapping for account connections.
+const DC_TO_MC: TableDefinition<u64, String> = TableDefinition::new("dc_to_mc");
+
+/// Minecraft username → Discord user ID reverse mapping.
+const MC_TO_DC: TableDefinition<String, u64> = TableDefinition::new("mc_to_dc");
+
+/// Set of Discord user IDs who opted out of join/leave announcements.
+const JOIN_LEAVE_OPTOUT: TableDefinition<u64, bool> = TableDefinition::new("join_leave_optout");
+
+/// Set of Discord user IDs who muted cross-chat mentions.
+const MUTE_MENTION: TableDefinition<u64, bool> = TableDefinition::new("mute_mention");
 
 /// (UUID, "YYYY-MM-DD") → seconds played that day (in configured timezone).
 pub const DAILY_PLAY_TIME: TableDefinition<(String, String), u64> =
@@ -118,6 +132,8 @@ pub enum StorageError {
     },
     #[error("storage worker panicked: {0}")]
     BlockingPanic(String),
+    #[error("minecraft username already claimed by another discord user")]
+    AlreadyClaimed,
 }
 
 /// redb-backed persistence for the bridge binding and player stats.
@@ -125,10 +141,21 @@ pub enum StorageError {
 /// Holds a long-lived `Arc<Database>` (`Send + Sync`) opened once at startup.
 /// Each transaction runs inside `spawn_blocking` because redb transactions are
 /// not `Send`.
+///
+/// Small lookup tables (account mappings, opt-out preferences, mute preferences)
+/// are mirrored in-memory behind `RwLock`s for zero-overhead hot-path reads.
+/// Writes flush to both in-memory and redb atomically.
 #[derive(Debug, Clone)]
 pub struct Storage {
     db: Arc<Database>,
     mc_server_address: String,
+    /// Parallel sorted vectors: `mc_usernames` (sorted) and `discord_ids` (same index).
+    /// MC→DC lookup via binary search on `mc_usernames`.
+    account_cache: Arc<RwLock<(Vec<String>, Vec<u64>)>>,
+    /// Discord user IDs that opted out of join/leave announcements.
+    join_leave_optout: Arc<RwLock<HashSet<u64>>>,
+    /// Discord user IDs that muted cross-chat mentions.
+    mute_mention: Arc<RwLock<HashSet<u64>>>,
 }
 
 impl Storage {
@@ -150,9 +177,16 @@ impl Storage {
         tracing::debug!(path = %path.display(), "opening redb database");
         let db = Database::create(path)?;
 
+        let (mc_usernames, discord_ids) = load_account_mappings(&db);
+        let join_leave = load_optout_set(&db, JOIN_LEAVE_OPTOUT);
+        let mute = load_optout_set(&db, MUTE_MENTION);
+
         Ok(Self {
             db: Arc::new(db),
             mc_server_address,
+            account_cache: Arc::new(RwLock::new((mc_usernames, discord_ids))),
+            join_leave_optout: Arc::new(RwLock::new(join_leave)),
+            mute_mention: Arc::new(RwLock::new(mute)),
         })
     }
 
@@ -401,6 +435,193 @@ impl Storage {
         }
     }
 
+    /// Connect a Discord user ID to a Minecraft username (dual mapping).
+    ///
+    /// Returns `AlreadyClaimed` if the Minecraft username is already connected to
+    /// a different Discord user.  If the Discord user was previously connected to
+    /// a different username the old mapping is automatically removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on persistence failure or `AlreadyClaimed` on conflict.
+    pub async fn set_connection(
+        &self,
+        discord_id: u64,
+        mc_username: String,
+    ) -> Result<(), StorageError> {
+        {
+            let cache = self.account_cache.read().await;
+            if let Ok(idx) = cache.0.binary_search(&mc_username)
+                && cache.1[idx] != discord_id
+            {
+                return Err(StorageError::AlreadyClaimed);
+            }
+        }
+
+        let db = Arc::clone(&self.db);
+        let mc = mc_username.clone();
+        tokio::task::spawn_blocking(move || write_account_mapping(&db, discord_id, &mc))
+            .await
+            .map_err(|e| StorageError::BlockingPanic(e.to_string()))??;
+
+        {
+            let mut cache = self.account_cache.write().await;
+            if let Some(pos) = cache.1.iter().position(|&id| id == discord_id) {
+                cache.0.remove(pos);
+                cache.1.remove(pos);
+            }
+            if cache.0.binary_search(&mc_username).is_err() {
+                let insert_pos = cache.0.binary_search(&mc_username).unwrap_err();
+                cache.0.insert(insert_pos, mc_username);
+                cache.1.insert(insert_pos, discord_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove the account connection for a Discord user.
+    ///
+    /// No-op if the user was not connected.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on persistence failure.
+    pub async fn remove_connection(&self, discord_id: u64) -> Result<(), StorageError> {
+        let mc_username: Option<String> = {
+            let cache = self.account_cache.read().await;
+            cache
+                .1
+                .iter()
+                .position(|&id| id == discord_id)
+                .map(|pos| cache.0[pos].clone())
+        };
+
+        let Some(mc) = mc_username else {
+            return Ok(());
+        };
+
+        let db = Arc::clone(&self.db);
+        let mc_clone = mc.clone();
+        tokio::task::spawn_blocking(move || remove_account_mapping(&db, discord_id, &mc_clone))
+            .await
+            .map_err(|e| StorageError::BlockingPanic(e.to_string()))??;
+
+        {
+            let mut cache = self.account_cache.write().await;
+            if let Ok(idx) = cache.0.binary_search(&mc) {
+                cache.0.remove(idx);
+                cache.1.remove(idx);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Look up a Discord user ID from a Minecraft username (hot path).
+    ///
+    /// In-memory only — O(log n) via binary search on the sorted `mc_usernames` vec.
+    pub async fn get_dc_from_mc(&self, mc_username: &str) -> Option<u64> {
+        let cache = self.account_cache.read().await;
+        cache
+            .0
+            .binary_search_by(|s| s.as_str().cmp(mc_username))
+            .ok()
+            .map(|idx| cache.1[idx])
+    }
+
+    /// Look up a Minecraft username from a Discord user ID (less frequent).
+    ///
+    /// In-memory only — O(n) linear scan on `discord_ids`.
+    pub async fn get_mc_from_dc(&self, discord_id: u64) -> Option<String> {
+        let cache = self.account_cache.read().await;
+        cache
+            .1
+            .iter()
+            .position(|&id| id == discord_id)
+            .map(|pos| cache.0[pos].clone())
+    }
+
+    /// Check whether a Discord user ID has any connected Minecraft account.
+    ///
+    /// In-memory only.
+    pub async fn is_connected_dc(&self, discord_id: u64) -> bool {
+        let cache = self.account_cache.read().await;
+        cache.1.contains(&discord_id)
+    }
+
+    /// Opt a Discord user in or out of join/leave broadcasting.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on persistence failure.
+    pub async fn set_join_leave_optout(
+        &self,
+        discord_id: u64,
+        opted_out: bool,
+    ) -> Result<(), StorageError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            write_optout_entry(&db, JOIN_LEAVE_OPTOUT, discord_id, opted_out)
+        })
+        .await
+        .map_err(|e| StorageError::BlockingPanic(e.to_string()))??;
+
+        {
+            let mut set = self.join_leave_optout.write().await;
+            if opted_out {
+                set.insert(discord_id);
+            } else {
+                set.remove(&discord_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check whether a Discord user has opted out of join/leave announcements.
+    ///
+    /// In-memory only — hot path, called on every join/leave event.
+    pub async fn is_join_leave_opted_out(&self, discord_id: u64) -> bool {
+        self.join_leave_optout.read().await.contains(&discord_id)
+    }
+
+    /// Opt a Discord user in or out of cross-chat mention pings.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on persistence failure.
+    pub async fn set_mute_mention(
+        &self,
+        discord_id: u64,
+        muted: bool,
+    ) -> Result<(), StorageError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            write_optout_entry(&db, MUTE_MENTION, discord_id, muted)
+        })
+        .await
+        .map_err(|e| StorageError::BlockingPanic(e.to_string()))??;
+
+        {
+            let mut set = self.mute_mention.write().await;
+            if muted {
+                set.insert(discord_id);
+            } else {
+                set.remove(&discord_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check whether a Discord user has muted cross-chat mention pings.
+    ///
+    /// In-memory only.
+    pub async fn is_mention_muted(&self, discord_id: u64) -> bool {
+        self.mute_mention.read().await.contains(&discord_id)
+    }
+
     /// Reverse-resolve a UUID to a username.
     ///
     /// # Errors
@@ -419,6 +640,113 @@ impl Storage {
             Err(join_err) => Err(StorageError::BlockingPanic(join_err.to_string())),
         }
     }
+}
+
+fn load_account_mappings(db: &Database) -> (Vec<String>, Vec<u64>) {
+    let mut mc_usernames: Vec<String> = Vec::new();
+    let mut discord_ids: Vec<u64> = Vec::new();
+
+    let rtxn = match db.begin_read() {
+        Ok(txn) => txn,
+        Err(_) => return (mc_usernames, discord_ids),
+    };
+
+    let table = match rtxn.open_table(DC_TO_MC) {
+        Ok(t) => t,
+        Err(_) => return (mc_usernames, discord_ids),
+    };
+
+    let mut pairs: Vec<(String, u64)> = Vec::new();
+    if let Ok(iter) = table.iter() {
+        for (key, value) in iter.flatten() {
+            pairs.push((value.value(), key.value()));
+        }
+    }
+
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    for (mc, dc) in pairs {
+        mc_usernames.push(mc);
+        discord_ids.push(dc);
+    }
+
+    (mc_usernames, discord_ids)
+}
+
+fn load_optout_set(db: &Database, table_def: TableDefinition<u64, bool>) -> HashSet<u64> {
+    let mut set = HashSet::new();
+
+    let rtxn = match db.begin_read() {
+        Ok(txn) => txn,
+        Err(_) => return set,
+    };
+
+    let table = match rtxn.open_table(table_def) {
+        Ok(t) => t,
+        Err(_) => return set,
+    };
+
+    if let Ok(iter) = table.iter() {
+        for (key, value) in iter.flatten() {
+            if value.value() {
+                set.insert(key.value());
+            }
+        }
+    }
+
+    set
+}
+
+fn write_account_mapping(db: &Database, discord_id: u64, mc_username: &str) -> Result<(), StorageError> {
+    let wtxn = db.begin_write()?;
+    {
+        let mut dc_table = wtxn.open_table(DC_TO_MC)?;
+        let mut mc_table = wtxn.open_table(MC_TO_DC)?;
+
+        let old_mc = dc_table.get(discord_id)?.map(|g| g.value());
+        if let Some(ref old) = old_mc {
+            mc_table.remove(old.clone())?;
+        }
+
+        dc_table.insert(discord_id, mc_username.to_string())?;
+        mc_table.insert(mc_username.to_string(), discord_id)?;
+    }
+    wtxn.commit()?;
+    Ok(())
+}
+
+fn remove_account_mapping(
+    db: &Database,
+    discord_id: u64,
+    mc_username: &str,
+) -> Result<(), StorageError> {
+    let wtxn = db.begin_write()?;
+    {
+        let mut dc_table = wtxn.open_table(DC_TO_MC)?;
+        let mut mc_table = wtxn.open_table(MC_TO_DC)?;
+        dc_table.remove(discord_id)?;
+        mc_table.remove(mc_username.to_string())?;
+    }
+    wtxn.commit()?;
+    Ok(())
+}
+
+fn write_optout_entry(
+    db: &Database,
+    table_def: TableDefinition<u64, bool>,
+    user_id: u64,
+    value: bool,
+) -> Result<(), StorageError> {
+    let wtxn = db.begin_write()?;
+    {
+        let mut table = wtxn.open_table(table_def)?;
+        if value {
+            table.insert(user_id, true)?;
+        } else {
+            table.remove(user_id)?;
+        }
+    }
+    wtxn.commit()?;
+    Ok(())
 }
 
 fn read_bridge(db: &Database) -> Result<Option<u64>, StorageError> {
@@ -619,7 +947,21 @@ fn write_player_deltas(
 
 #[cfg(test)]
 fn open_test_storage(path: &Path) -> Storage {
-    Storage::open(path, "localhost:25565".to_string()).expect("failed to open test storage")
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let db = Database::create(path).expect("failed to create test db");
+    let (mc_usernames, discord_ids) = load_account_mappings(&db);
+    let join_leave = load_optout_set(&db, JOIN_LEAVE_OPTOUT);
+    let mute = load_optout_set(&db, MUTE_MENTION);
+
+    Storage {
+        db: Arc::new(db),
+        mc_server_address: "localhost:25565".to_string(),
+        account_cache: Arc::new(RwLock::new((mc_usernames, discord_ids))),
+        join_leave_optout: Arc::new(RwLock::new(join_leave)),
+        mute_mention: Arc::new(RwLock::new(mute)),
+    }
 }
 
 #[cfg(test)]

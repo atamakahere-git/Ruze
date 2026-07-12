@@ -1,9 +1,12 @@
 use std::borrow::Cow;
 use std::fmt::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use base64::Engine;
 use poise::serenity_prelude as serenity;
 
+use super::types::PendingVerification;
 use super::{BotError, Context};
 
 fn url_to_hostport(url: &url::Url) -> Cow<'_, str> {
@@ -469,6 +472,112 @@ pub async fn leaderboard(ctx: Context<'_>) -> Result<(), BotError> {
         .description(desc);
 
     ctx.send(poise::CreateReply::default().embed(embed)).await?;
+    Ok(())
+}
+
+static CODE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn generate_verification_code() -> String {
+    let count = CODE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let combined = timestamp.wrapping_mul(31).wrapping_add(count);
+    format!("{:08X}", combined & 0xFFFF_FFFF)
+}
+
+fn connect_help() -> String {
+    String::from("Connect your Discord account with a Minecraft username for mentions and privacy features.")
+}
+
+/// Connect your Discord account with a Minecraft username.
+///
+/// A random verification code will be generated and you must type
+/// `@s CONFIRM-<code>` in Minecraft chat within 30 seconds to prove ownership.
+#[poise::command(slash_command, prefix_command, help_text_fn = connect_help)]
+pub async fn connect(
+    ctx: Context<'_>,
+    #[description = "Minecraft username"] mc_username: String,
+) -> Result<(), BotError> {
+    let discord_id = ctx.author().id.get();
+    tracing::info!(
+        user = %ctx.author().name,
+        discord_id = %discord_id,
+        mc_username = %mc_username,
+        "command /connect executed"
+    );
+
+    if ctx.data().storage.is_connected_dc(discord_id).await {
+        ctx.say("❌ You are already connected to a Minecraft account. Use `/disconnect` first if you want to switch.".to_string())
+            .await?;
+        return Ok(());
+    }
+
+    if let Some(existing_dc) = ctx.data().storage.get_dc_from_mc(&mc_username).await {
+        if existing_dc == discord_id {
+            ctx.say("✅ You are already connected to this Minecraft account.").await?;
+            return Ok(());
+        }
+        ctx.say(format!(
+            "❌ The Minecraft account `{mc_username}` is already linked to another Discord user."
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    let code = generate_verification_code();
+
+    {
+        let mut guard = ctx.data().pending_verifications.lock().await;
+        guard.insert(
+            code.clone(),
+            PendingVerification {
+                discord_user_id: discord_id,
+                mc_username: mc_username.clone(),
+                code: code.clone(),
+                expires_at: Instant::now() + std::time::Duration::from_secs(30),
+            },
+        );
+    }
+
+    ctx.say(format!(
+        "🔐 To verify you own `{mc_username}`, type this in Minecraft chat within **30 seconds**:\n\n```@s CONFIRM-{code}```"
+    ))
+    .await?;
+    Ok(())
+}
+
+fn disconnect_help() -> String {
+    String::from("Disconnect your Discord account from any linked Minecraft username.")
+}
+
+/// Remove the connection between your Discord account and Minecraft username.
+#[poise::command(slash_command, prefix_command, help_text_fn = disconnect_help)]
+pub async fn disconnect(ctx: Context<'_>) -> Result<(), BotError> {
+    let discord_id = ctx.author().id.get();
+    tracing::info!(
+        user = %ctx.author().name,
+        discord_id = %discord_id,
+        "command /disconnect executed"
+    );
+
+    if !ctx.data().storage.is_connected_dc(discord_id).await {
+        ctx.say("❌ You haven't connected a Minecraft account yet. Use `/connect <username>` first.")
+            .await?;
+        return Ok(());
+    }
+
+    let mc_username = ctx.data().storage.get_mc_from_dc(discord_id).await;
+    ctx.data().storage.remove_connection(discord_id).await?;
+
+    let msg = if let Some(mc) = mc_username {
+        format!("🔓 Disconnected. Your Minecraft account **{mc}** is no longer linked.")
+    } else {
+        "🔓 Disconnected.".to_string()
+    };
+
+    ctx.say(msg).await?;
     Ok(())
 }
 

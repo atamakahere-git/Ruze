@@ -10,9 +10,9 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
 };
 
-use super::types::PendingVerification;
 use super::BotError;
 use super::commands;
+use super::types::PendingVerification;
 use super::types::{BotParams, Data, FromDiscordEvent, FromMinecraftEvent};
 use crate::log_parser::is_silent_message_prefix;
 use crate::rcon::ReconnectingRcon;
@@ -85,9 +85,7 @@ async fn process_mc_mentions(content: &str, sender_mc: &str, storage: &Storage) 
         let is_word_char = b.is_ascii_alphanumeric() || b == b'_';
         if is_word_char && word_start.is_none() {
             word_start = Some(i);
-        } else if !is_word_char
-            && let Some(s) = word_start
-        {
+        } else if !is_word_char && let Some(s) = word_start {
             let len = i - s;
             if (3..=16).contains(&len) {
                 let word = &content[s..i];
@@ -290,7 +288,9 @@ pub async fn start_bot(
                             let _ = target_channel
                                 .say(
                                     http,
-                                    format!("❌ <@{dc}> Failed to save connection. Please try again."),
+                                    format!(
+                                        "❌ <@{dc}> Failed to save connection. Please try again."
+                                    ),
                                 )
                                 .await;
                         } else {
@@ -342,9 +342,7 @@ pub async fn start_bot(
 
             if privacy_enabled
                 && !event.mc_username.is_empty()
-                && let Some(dc_id) = storage_for_forward
-                    .get_dc_from_mc(&event.mc_username)
-                    .await
+                && let Some(dc_id) = storage_for_forward.get_dc_from_mc(&event.mc_username).await
                 && storage_for_forward.is_join_leave_opted_out(dc_id).await
             {
                 continue;
@@ -352,14 +350,10 @@ pub async fn start_bot(
 
             let is_chat = event.username == event.mc_username && !event.mc_username.is_empty();
 
-            let formatted_message = if is_chat && privacy_enabled
-            {
-                let mention_content = process_mc_mentions(
-                    &event.content,
-                    &event.mc_username,
-                    &storage_for_forward,
-                )
-                .await;
+            let formatted_message = if is_chat && privacy_enabled {
+                let mention_content =
+                    process_mc_mentions(&event.content, &event.mc_username, &storage_for_forward)
+                        .await;
                 format!("**{}**: {}", event.username, mention_content)
             } else {
                 format!("**{}**: {}", event.username, event.content)

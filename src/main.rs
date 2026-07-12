@@ -69,10 +69,8 @@ async fn main() -> Result<(), bot::BotError> {
         }
     });
 
-    let rcon_client = rcon::ReconnectingRcon::connect(
-        config.rcon.address.clone(),
-        config.rcon.password.clone(),
-    )?;
+    let rcon_client =
+        rcon::ReconnectingRcon::connect(config.rcon.address.clone(), config.rcon.password.clone())?;
     let shared_rcon = Arc::new(rcon_client);
 
     spawn_dc_to_mc_relay(dc_event_rx, Arc::clone(&shared_rcon));

@@ -66,7 +66,10 @@ impl ReconnectingRcon {
     /// Synchronous send with automatic reconnection on failure.
     fn send_command_sync(&self, command: &str) -> Result<String, RconError> {
         {
-            let guard = self.client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = self
+                .client
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref client) = *guard {
                 match client.send_command(command) {
                     Ok(result) => return Ok(result),
@@ -147,7 +150,8 @@ impl ReconnectingRcon {
             let result = Self::create_client(&addr, &pwd);
             let _ = tx.send(result);
         });
-        rx.recv_timeout(timeout)
-            .map_err(|_| RconError::Rcon(format!("RCON connect timeout after {}s", timeout.as_secs())))?
+        rx.recv_timeout(timeout).map_err(|_| {
+            RconError::Rcon(format!("RCON connect timeout after {}s", timeout.as_secs()))
+        })?
     }
 }

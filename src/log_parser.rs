@@ -11,8 +11,7 @@ static RECENT_DISCONNECTS: LazyLock<Mutex<HashMap<String, String>>> =
 
 /// Tracks the last server-stop event timestamp to suppress duplicates.
 #[cfg(not(test))]
-static LAST_SERVER_STOP: LazyLock<Mutex<Option<Instant>>> =
-    LazyLock::new(|| Mutex::new(None));
+static LAST_SERVER_STOP: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, PartialEq)]
 pub enum MinecraftEvent {

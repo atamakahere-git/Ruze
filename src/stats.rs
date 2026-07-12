@@ -256,14 +256,11 @@ impl StatsTracker {
                 r#"tellraw @a {{"text":"[Stats] Welcome back {user}! Last login: {last_login_str}. Yesterday you played {yesterday_str}.","color":"gold"}}"#
             );
 
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                rcon.send_command(msg),
-            )
-            .await
-            {
+            match tokio::time::timeout(Duration::from_secs(5), rcon.send_command(msg)).await {
                 Ok(Ok(_)) => tracing::info!(username = %user, "login reminder sent"),
-                Ok(Err(e)) => tracing::warn!(%e, username = %user, "failed to send login reminder via rcon"),
+                Ok(Err(e)) => {
+                    tracing::warn!(%e, username = %user, "failed to send login reminder via rcon")
+                }
                 Err(_) => tracing::warn!(username = %user, "rcon login reminder timed out"),
             }
         });
@@ -277,14 +274,11 @@ impl StatsTracker {
         let rcon = Arc::clone(&self.rcon);
         let user = username.to_string();
         tokio::spawn(async move {
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                rcon.send_command(msg),
-            )
-            .await
-            {
+            match tokio::time::timeout(Duration::from_secs(5), rcon.send_command(msg)).await {
                 Ok(Ok(_)) => tracing::info!(username = %user, "new player welcome sent"),
-                Ok(Err(e)) => tracing::warn!(%e, username = %user, "failed to send new player welcome via rcon"),
+                Ok(Err(e)) => {
+                    tracing::warn!(%e, username = %user, "failed to send new player welcome via rcon")
+                }
                 Err(_) => tracing::warn!(username = %user, "rcon welcome timed out"),
             }
         });

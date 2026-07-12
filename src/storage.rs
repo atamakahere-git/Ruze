@@ -624,11 +624,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns `StorageError` on persistence failure.
-    pub async fn set_mute_mention(
-        &self,
-        discord_id: u64,
-        muted: bool,
-    ) -> Result<(), StorageError> {
+    pub async fn set_mute_mention(&self, discord_id: u64, muted: bool) -> Result<(), StorageError> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || {
             write_optout_entry(&db, MUTE_MENTION, discord_id, muted)
@@ -740,7 +736,11 @@ fn load_optout_set(db: &Database, table_def: TableDefinition<u64, bool>) -> Hash
     set
 }
 
-fn write_account_mapping(db: &Database, discord_id: u64, mc_username: &str) -> Result<(), StorageError> {
+fn write_account_mapping(
+    db: &Database,
+    discord_id: u64,
+    mc_username: &str,
+) -> Result<(), StorageError> {
     let wtxn = db.begin_write()?;
     {
         let mut dc_table = wtxn.open_table(DC_TO_MC)?;

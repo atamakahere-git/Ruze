@@ -302,7 +302,7 @@ fn try_chat(line: &str) -> Option<MinecraftEvent> {
     let username = captures.name("username")?.as_str().to_owned();
     let message = captures.name("message")?.as_str().to_owned();
 
-    if message.len() > 11 && message[..12].eq_ignore_ascii_case("@s CONFIRM-") {
+    if message.len() > 11 && message[..11].eq_ignore_ascii_case("@s CONFIRM-") {
         tracing::debug!(%username, "verification confirm message parsed");
         return Some(MinecraftEvent::Chat { username, message });
     }

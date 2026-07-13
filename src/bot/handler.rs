@@ -57,6 +57,7 @@ async fn process_dc_mentions(content: &str, storage: &Storage) -> String {
     for &(_, _, user_id) in &candidates {
         if !cache.iter().any(|(id, _)| *id == user_id) {
             let mc_name = storage.get_mc_from_dc(user_id).await;
+            tracing::debug!(discord_id = user_id, mc_name = ?mc_name, "dc→mc mention: looked up user");
             cache.push((user_id, mc_name));
         }
     }
@@ -64,7 +65,13 @@ async fn process_dc_mentions(content: &str, storage: &Storage) -> String {
     let mut replacements: Vec<(usize, usize, String)> = Vec::new();
     for (s, e, user_id) in &candidates {
         if let Some((_, Some(name))) = cache.iter().find(|(id, _)| id == user_id) {
+            tracing::debug!(discord_id = user_id, mc_name = %name, "dc→mc mention: replacing with @name");
             replacements.push((*s, *e, format!("@{name}")));
+        } else {
+            tracing::trace!(
+                discord_id = user_id,
+                "dc→mc mention: no MC mapping found, leaving unchanged"
+            );
         }
     }
 
@@ -73,6 +80,7 @@ async fn process_dc_mentions(content: &str, storage: &Storage) -> String {
         result.replace_range(s..e, &replacement);
     }
 
+    tracing::debug!(original = %content, result = %result, "dc→mc mention processing complete");
     result
 }
 
@@ -115,6 +123,12 @@ async fn process_mc_mentions(content: &str, sender_mc: &str, storage: &Storage) 
             {
                 Some(id)
             } else {
+                let reason = if storage.get_dc_from_mc(word).await.is_none() {
+                    "no dc mapping"
+                } else {
+                    "mention muted"
+                };
+                tracing::debug!(mc_username = %word, reason, "mc→dc mention: skipped");
                 None
             };
             cache.push((word, dc_id));
@@ -124,6 +138,7 @@ async fn process_mc_mentions(content: &str, sender_mc: &str, storage: &Storage) 
     let mut replacements: Vec<(usize, usize, u64)> = Vec::new();
     for (s, e, word) in &candidates {
         if let Some((_, Some(id))) = cache.iter().find(|(w, _)| *w == *word) {
+            tracing::debug!(mc_username = %word, discord_id = id, "mc→dc mention: replacing with ping");
             replacements.push((*s, *e, *id));
         }
     }
@@ -133,6 +148,7 @@ async fn process_mc_mentions(content: &str, sender_mc: &str, storage: &Storage) 
         result.replace_range(s..e, &format!("<@{dc_id}>"));
     }
 
+    tracing::debug!(sender = %sender_mc, original = %content, result = %result, "mc→dc mention processing complete");
     result
 }
 
@@ -244,26 +260,55 @@ pub async fn start_bot(
 
     tokio::spawn(async move {
         while let Some(event) = mc_event_rx.recv().await {
+            tracing::info!(
+                event_type = "mc→dc",
+                username = %event.username,
+                mc_username = %event.mc_username,
+                content = %event.content,
+                "mc→dc: received Minecraft event for Discord"
+            );
+
             let target_channel = {
                 let guard = bridge_channel_clone.read().await;
                 *guard
             };
 
             let Some(target_channel) = target_channel else {
+                tracing::debug!("mc→dc: no bridge channel set, dropping event");
                 continue;
             };
 
             let lower = event.content.to_ascii_lowercase();
             if let Some(code_raw) = lower.strip_prefix("@s confirm-") {
                 let code = code_raw.trim().to_ascii_uppercase();
+                tracing::info!(mc_username = %event.username, code = %code, "CONFIRM: processing verification code");
                 let mut guard = pv_for_forward.lock().await;
 
                 if let Some(pending) = guard.remove(&code) {
+                    tracing::info!(
+                        discord_user = %pending.discord_user_id,
+                        expected_mc = %pending.mc_username,
+                        actual_mc = %event.username,
+                        attempts = %pending.attempts,
+                        expires = ?pending.expires_at,
+                        "CONFIRM: found pending verification"
+                    );
                     if pending.mc_username != event.username {
+                        tracing::warn!(
+                            discord_user = %pending.discord_user_id,
+                            expected_mc = %pending.mc_username,
+                            actual_mc = %event.username,
+                            "CONFIRM: username mismatch — re-inserting pending"
+                        );
                         guard.insert(code, pending);
                         continue;
                     }
                     if pending.expires_at <= Instant::now() {
+                        tracing::info!(
+                            discord_user = %pending.discord_user_id,
+                            mc_username = %pending.mc_username,
+                            "CONFIRM: verification expired (30s elapsed)"
+                        );
                         drop(guard);
                         let http = Arc::clone(&cache_http_for_forward);
                         let _ = target_channel
@@ -277,40 +322,69 @@ pub async fn start_bot(
                             .await;
                         continue;
                     }
+                    tracing::info!(
+                        discord_user = %pending.discord_user_id,
+                        mc_username = %pending.mc_username,
+                        "CONFIRM: code valid — proceeding to connect"
+                    );
                     drop(guard);
                     let http = Arc::clone(&cache_http_for_forward);
                     let storage = Arc::clone(&storage_for_forward);
                     let mc = pending.mc_username.clone();
                     let dc = pending.discord_user_id;
                     tokio::spawn(async move {
-                        if let Err(e) = storage.set_connection(dc, mc.clone()).await {
-                            tracing::error!(%e, "failed to persist account connection");
-                            let _ = target_channel
-                                .say(
-                                    http,
-                                    format!(
-                                        "❌ <@{dc}> Failed to save connection. Please try again."
-                                    ),
-                                )
-                                .await;
-                        } else {
-                            let _ = target_channel
-                                .say(
-                                    http,
-                                    format!(
-                                        "✅ <@{dc}> Connected! Your Minecraft account **{mc}** is now linked."
-                                    ),
-                                )
-                                .await;
+                        match storage.set_connection(dc, mc.clone()).await {
+                            Ok(()) => {
+                                tracing::info!(
+                                    discord_user = dc,
+                                    mc_username = %mc,
+                                    "CONFIRM: account linked successfully"
+                                );
+                                let _ = target_channel
+                                    .say(
+                                        http,
+                                        format!(
+                                            "✅ <@{dc}> Connected! Your Minecraft account **{mc}** is now linked."
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    discord_user = dc,
+                                    mc_username = %mc,
+                                    error = %e,
+                                    "CONFIRM: failed to persist account connection"
+                                );
+                                let _ = target_channel
+                                    .say(
+                                        http,
+                                        format!(
+                                            "❌ <@{dc}> Failed to save connection. Please try again."
+                                        ),
+                                    )
+                                    .await;
+                            }
                         }
                     });
                     continue;
                 }
 
+                tracing::info!(
+                    mc_username = %event.username,
+                    code = %code,
+                    "CONFIRM: code not found in pending map — checking for lockout or invalid code"
+                );
                 let mut lockout_key: Option<String> = None;
                 for (key, pending) in guard.iter_mut() {
                     if pending.mc_username == event.username {
                         pending.attempts += 1;
+                        tracing::info!(
+                            discord_user = %pending.discord_user_id,
+                            mc_username = %pending.mc_username,
+                            attempt = %pending.attempts,
+                            "CONFIRM: failed attempt incremented"
+                        );
                         if pending.attempts >= 3 {
                             lockout_key = Some(key.clone());
                         }
@@ -321,6 +395,11 @@ pub async fn start_bot(
                     let pending = guard.remove(key);
                     drop(guard);
                     if let Some(pending) = pending {
+                        tracing::warn!(
+                            discord_user = %pending.discord_user_id,
+                            mc_username = %pending.mc_username,
+                            "CONFIRM: locked out after 3 failed attempts"
+                        );
                         let http = Arc::clone(&cache_http_for_forward);
                         let _ = target_channel
                             .say(
@@ -339,25 +418,46 @@ pub async fn start_bot(
             }
 
             let privacy_enabled = storage_for_forward.is_privacy_enabled().await;
+            tracing::debug!(privacy_enabled, "mc→dc: checking privacy gate");
 
             if privacy_enabled
                 && !event.mc_username.is_empty()
                 && let Some(dc_id) = storage_for_forward.get_dc_from_mc(&event.mc_username).await
                 && storage_for_forward.is_join_leave_opted_out(dc_id).await
             {
+                tracing::info!(
+                    username = %event.username,
+                    discord_id = dc_id,
+                    "mc→dc: event filtered — user has opted out",
+                );
                 continue;
             }
 
             let is_chat = event.username == event.mc_username && !event.mc_username.is_empty();
 
             let formatted_message = if is_chat && privacy_enabled {
+                tracing::debug!(
+                    username = %event.username,
+                    "mc→dc: processing mentions for chat message",
+                );
                 let mention_content =
                     process_mc_mentions(&event.content, &event.mc_username, &storage_for_forward)
                         .await;
                 format!("**{}**: {}", event.username, mention_content)
             } else {
+                if !privacy_enabled {
+                    tracing::trace!(
+                        "mc→dc: privacy disabled — forwarding without mention processing"
+                    );
+                }
                 format!("**{}**: {}", event.username, event.content)
             };
+
+            tracing::info!(
+                username = %event.username,
+                formatted = %formatted_message,
+                "mc→dc: forwarding event to Discord",
+            );
 
             let http_clone = Arc::clone(&cache_http_for_forward);
             let msg = formatted_message.clone();
@@ -369,7 +469,7 @@ pub async fn start_bot(
                     tracing::warn!(
                         channel = %target_channel,
                         error = %why,
-                        "failed to forward Minecraft event to Discord"
+                        "mc→dc: failed to forward Minecraft event to Discord"
                     );
 
                     let error_msg = why.to_string();
@@ -379,12 +479,17 @@ pub async fn start_bot(
                         *guard = None;
                         tracing::info!(
                             channel = %target_channel,
-                            "cleared unreachable bridge channel"
+                            "mc→dc: cleared unreachable bridge channel"
                         );
                         if let Err(e) = storage_ref.clear_bridge_channel().await {
-                            tracing::error!(%e, "failed to persist bridge clear");
+                            tracing::error!(%e, "mc→dc: failed to persist bridge clear");
                         }
                     }
+                } else {
+                    tracing::debug!(
+                        channel = %target_channel,
+                        "mc→dc: event forwarded to Discord successfully",
+                    );
                 }
             });
         }
@@ -394,7 +499,15 @@ pub async fn start_bot(
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
             let mut guard = pv_for_cleanup.lock().await;
+            let before = guard.len();
             guard.retain(|_, v| v.expires_at > Instant::now());
+            let cleaned = before - guard.len();
+            if cleaned > 0 {
+                tracing::debug!(
+                    "cleaned {cleaned} expired pending verifications (remaining: {})",
+                    guard.len()
+                );
+            }
         }
     });
 
@@ -458,27 +571,46 @@ async fn event_handler(
                 .ok();
         }
         serenity::FullEvent::Message { new_message } => {
-            let should_relay = {
+            let is_bot = new_message.author.id == ctx.cache.current_user().id;
+            let is_bridge_channel = {
                 let guard = data.bridge_channel.read().await;
                 *guard == Some(new_message.channel_id)
             };
 
-            if should_relay && new_message.author.id != ctx.cache.current_user().id {
+            tracing::trace!(
+                user = %new_message.author.name,
+                channel = %new_message.channel_id,
+                is_bot,
+                is_bridge_channel,
+                content = %new_message.content,
+                "dc→mc: Discord message received",
+            );
+
+            if is_bridge_channel && !is_bot {
                 let author_id = new_message.author.id.get();
                 let privacy_enabled = data.storage.is_privacy_enabled().await;
 
+                tracing::info!(
+                    user = %new_message.author.name,
+                    author_id,
+                    privacy_enabled,
+                    "dc→mc: processing Discord message for relay",
+                );
+
                 if privacy_enabled {
                     if !data.storage.is_connected_dc(author_id).await {
-                        tracing::debug!(
+                        tracing::info!(
                             user = %new_message.author.name,
-                            "not connected, skipping discord→mc"
+                            author_id,
+                            "dc→mc: filtered — user not connected (privacy enabled)",
                         );
                         return Ok(());
                     }
                     if data.storage.is_join_leave_opted_out(author_id).await {
-                        tracing::debug!(
+                        tracing::info!(
                             user = %new_message.author.name,
-                            "opted out, skipping discord→mc"
+                            author_id,
+                            "dc→mc: filtered — user opted out (privacy enabled)",
                         );
                         return Ok(());
                     }
@@ -490,17 +622,26 @@ async fn event_handler(
                     });
 
                 if is_silent {
-                    tracing::debug!(
+                    tracing::info!(
                         user = %new_message.author.name,
                         content = %new_message.content,
-                        "ignored silent discord→mc message"
+                        "dc→mc: filtered — silent message",
                     );
                 } else {
                     let content = if privacy_enabled {
+                        tracing::debug!(
+                            user = %new_message.author.name,
+                            "dc→mc: processing mentions before relay",
+                        );
                         process_dc_mentions(&new_message.content, &data.storage).await
                     } else {
                         new_message.content.clone()
                     };
+                    tracing::info!(
+                        user = %new_message.author.name,
+                        content = %content,
+                        "dc→mc: relaying message to Minecraft",
+                    );
                     data.dc_event_tx
                         .send(FromDiscordEvent {
                             username: new_message.author.name.clone(),
@@ -511,7 +652,7 @@ async fn event_handler(
                             tracing::warn!(
                                 user = %new_message.author.name,
                                 error = %e,
-                                "discord→mc event dropped"
+                                "dc→mc: event dropped — channel closed",
                             );
                         })
                         .ok();

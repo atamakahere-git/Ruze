@@ -239,6 +239,7 @@ impl MinecraftEvent {
 }
 
 pub fn parse_log_line(line: &str) -> Option<MinecraftEvent> {
+    tracing::trace!("raw log line: {line}");
     if let Some(event) = try_chat(line) {
         return Some(event);
     }
@@ -246,7 +247,10 @@ pub fn parse_log_line(line: &str) -> Option<MinecraftEvent> {
         return Some(event);
     }
 
-    let payload = extract_system_payload(line)?;
+    let Some(payload) = extract_system_payload(line) else {
+        tracing::trace!("line does not match system payload pattern: {line}");
+        return None;
+    };
 
     if is_ignorable_system_message(payload) {
         tracing::trace!("ignored system line: {payload}");
@@ -287,6 +291,7 @@ pub fn parse_log_line(line: &str) -> Option<MinecraftEvent> {
         return Some(event);
     }
 
+    tracing::trace!("unmatched line (after system payload extraction): {payload}");
     None
 }
 
@@ -303,15 +308,15 @@ fn try_chat(line: &str) -> Option<MinecraftEvent> {
     let message = captures.name("message")?.as_str().to_owned();
 
     if message.len() > 11 && message[..11].eq_ignore_ascii_case("@s CONFIRM-") {
-        tracing::debug!(%username, "verification confirm message parsed");
+        tracing::info!(%username, code = %message[11..].split_whitespace().next().unwrap_or("?"), "CONFIRM code detected in chat — bypassing silent filter");
         return Some(MinecraftEvent::Chat { username, message });
     }
 
     if contains_silent_token(&message) {
-        tracing::debug!(%username, %message, "ignored silent chat message");
+        tracing::info!(%username, %message, "chat filtered: contains @s silent token");
         return None;
     }
-    tracing::debug!(%username, "chat event parsed");
+    tracing::debug!(%username, message = %message, "chat event parsed");
     Some(MinecraftEvent::Chat { username, message })
 }
 

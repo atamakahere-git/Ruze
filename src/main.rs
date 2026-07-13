@@ -134,6 +134,12 @@ fn spawn_dc_to_mc_relay(
         tracing::info!("Discord → Minecraft relay started");
 
         while let Some(event) = dc_event_rx.recv().await {
+            tracing::info!(
+                username = %event.username,
+                content = %event.content,
+                "dc→mc relay: received Discord message for Minecraft"
+            );
+
             let safe_username: String = event
                 .username
                 .chars()
@@ -153,6 +159,7 @@ fn spawn_dc_to_mc_relay(
             let formatted_command = format!(
                 r#"tellraw @a {{"text":"[Discord] <{safe_username}>: {safe_content}", "color":"gold"}}"#
             );
+            tracing::debug!(command = %formatted_command, "dc→mc: sending tellraw via RCON");
             if let Err(why) = rcon.send_command(formatted_command).await {
                 tracing::warn!(
                     username = %event.username,
@@ -162,7 +169,8 @@ fn spawn_dc_to_mc_relay(
             } else {
                 tracing::info!(
                     username = %event.username,
-                    "dc→mc"
+                    content = %event.content,
+                    "dc→mc send successful"
                 );
             }
         }

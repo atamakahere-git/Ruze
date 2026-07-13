@@ -500,13 +500,15 @@ impl Storage {
         {
             let mut cache = self.account_cache.write().await;
             if let Some(pos) = cache.1.iter().position(|&id| id == discord_id) {
-                cache.0.remove(pos);
+                let old_mc = cache.0.remove(pos);
                 cache.1.remove(pos);
+                tracing::info!(discord_id, old_mc = %old_mc, "removed previous mapping before re-connect");
             }
             if cache.0.binary_search(&mc_username).is_err() {
                 let insert_pos = cache.0.binary_search(&mc_username).unwrap_err();
                 cache.0.insert(insert_pos, mc_username);
                 cache.1.insert(insert_pos, discord_id);
+                tracing::info!(discord_id, mc_username = %cache.0[insert_pos], "account connected");
             }
         }
 
@@ -545,6 +547,7 @@ impl Storage {
             if let Ok(idx) = cache.0.binary_search(&mc) {
                 cache.0.remove(idx);
                 cache.1.remove(idx);
+                tracing::info!(discord_id, mc_username = %mc, "account disconnected");
             }
         }
 
@@ -604,8 +607,10 @@ impl Storage {
             let mut set = self.join_leave_optout.write().await;
             if opted_out {
                 set.insert(discord_id);
+                tracing::info!(discord_id, "user opted out of join/leave broadcast");
             } else {
                 set.remove(&discord_id);
+                tracing::info!(discord_id, "user re-subscribed to join/leave broadcast");
             }
         }
 
@@ -636,8 +641,10 @@ impl Storage {
             let mut set = self.mute_mention.write().await;
             if muted {
                 set.insert(discord_id);
+                tracing::info!(discord_id, "user muted cross-chat mentions");
             } else {
                 set.remove(&discord_id);
+                tracing::info!(discord_id, "user un-muted cross-chat mentions");
             }
         }
 

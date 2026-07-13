@@ -65,6 +65,7 @@ impl ReconnectingRcon {
 
     /// Synchronous send with automatic reconnection on failure.
     fn send_command_sync(&self, command: &str) -> Result<String, RconError> {
+        tracing::debug!(command = %command, "RCON: sending command");
         {
             let guard = self
                 .client
@@ -72,21 +73,27 @@ impl ReconnectingRcon {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref client) = *guard {
                 match client.send_command(command) {
-                    Ok(result) => return Ok(result),
+                    Ok(result) => {
+                        tracing::trace!(result_len = %result.len(), "RCON: command successful");
+                        return Ok(result);
+                    }
                     Err(e) => {
-                        tracing::warn!("rcon send failed: {e}, will attempt reconnect");
+                        tracing::warn!(error = %e, "RCON send failed — will attempt reconnect");
                     }
                 }
+            } else {
+                tracing::warn!("RCON client is None — will attempt reconnect");
             }
         }
 
         if !self.should_reconnect() {
+            tracing::warn!("RCON reconnect rate-limited — last attempt <5s ago");
             return Err(RconError::Rcon(
                 "reconnect rate limited, last attempt was <5s ago".to_string(),
             ));
         }
 
-        tracing::info!("reconnecting RCON to {}...", self.address);
+        tracing::info!(address = %self.address, "RCON: starting reconnection");
         match Self::create_client_with_timeout(&self.address, &self.password, CONNECT_TIMEOUT) {
             Ok(new_client) => {
                 let mut guard = self
@@ -95,7 +102,7 @@ impl ReconnectingRcon {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let result = new_client.send_command(command);
                 *guard = Some(new_client);
-                tracing::info!("RCON reconnected successfully");
+                tracing::info!("RCON reconnected and replayed command successfully");
                 result.map_err(|e| RconError::Rcon(format!("{e}")))
             }
             Err(e) => {
@@ -104,7 +111,7 @@ impl ReconnectingRcon {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *guard = None;
-                tracing::error!(%e, "RCON reconnection failed");
+                tracing::error!(error = %e, "RCON reconnection failed");
                 Err(e)
             }
         }

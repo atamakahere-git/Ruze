@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use base64::Engine;
 use poise::serenity_prelude as serenity;
+use rust_mc_status::StatusExt;
 
 use super::types::PendingVerification;
 use super::{BotError, Context};
@@ -99,16 +100,14 @@ pub async fn info(ctx: Context<'_>) -> Result<(), BotError> {
         if let Ok(status) = ctx
             .data()
             .mc_status_client
-            .ping(&query_address, rust_mc_status::ServerEdition::Java)
+            .java(query_address.as_ref())
             .await
         {
-            latency_ms = status.latency;
-            if let rust_mc_status::ServerData::Java(java_data) = status.data {
-                motd = java_data.description;
-                favicon_b64 = java_data.favicon;
-                total_players_online = java_data.players.online;
-                max_players_limit = java_data.players.max;
-            }
+            latency_ms = status.latency_ms();
+            motd.clone_from(&status.motd().to_owned());
+            favicon_b64 = status.favicon().map(str::to_owned);
+            total_players_online = status.players_online();
+            max_players_limit = status.players_max();
         }
         (
             motd,
@@ -738,6 +737,186 @@ pub async fn unmutemention(ctx: Context<'_>) -> Result<(), BotError> {
         .await?;
     ctx.say("🔔 You will be pinged when your Minecraft name is mentioned in chat.")
         .await?;
+    Ok(())
+}
+
+fn connect_admin_help() -> String {
+    String::from(
+        "Manually link a Discord user to a Minecraft username (bypasses verification). Owner only.",
+    )
+}
+
+/// Manually link a Discord user to a Minecraft username — bypasses verification.
+///
+/// Bot owner only.  Connects the mentioned Discord user to the given Minecraft
+/// username immediately without requiring in-game verification.
+#[poise::command(slash_command, prefix_command, help_text_fn = connect_admin_help, check = "is_owner")]
+pub async fn connect_admin(
+    ctx: Context<'_>,
+    #[description = "Minecraft username"] mc_username: String,
+    #[description = "Discord user to link"] discord_user: serenity::User,
+) -> Result<(), BotError> {
+    let discord_id = discord_user.id.get();
+    tracing::info!(
+        user = %ctx.author().name,
+        target_discord = %discord_user.name,
+        target_discord_id = %discord_id,
+        mc_username = %mc_username,
+        "command /connect_admin executed"
+    );
+
+    if !is_valid_mc_username(&mc_username) {
+        ctx.say("❌ Invalid Minecraft username. Must be 3–16 characters, using only letters, numbers, and underscores.").await?;
+        return Ok(());
+    }
+
+    if let Some(existing_dc) = ctx.data().storage.get_dc_from_mc(&mc_username).await {
+        ctx.say(format!(
+            "❌ The Minecraft account `{mc_username}` is already linked to <@{existing_dc}>."
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    match ctx
+        .data()
+        .storage
+        .set_connection(discord_id, mc_username.clone())
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(
+                user = %ctx.author().name,
+                discord_id,
+                mc_username = %mc_username,
+                "connect_admin: account linked"
+            );
+            ctx.say(format!("✅ Linked <@{discord_id}> → **{mc_username}**."))
+                .await?;
+        }
+        Err(e) => {
+            tracing::error!(%e, "connect_admin: failed to link account");
+            ctx.say(format!("❌ Failed to link account: {e}")).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse a duration string like "5m", "1h", "1d", "30s" into seconds.
+/// Returns None if the string is malformed.
+fn parse_duration(input: &str) -> Option<u64> {
+    let input = input.trim().to_lowercase();
+    if input.is_empty() {
+        return None;
+    }
+    let (num_str, unit) = input.split_at(input.len() - 1);
+    let num: u64 = num_str.parse().ok()?;
+    match unit {
+        "s" => Some(num),
+        "m" => Some(num * 60),
+        "h" => Some(num * 3600),
+        "d" => Some(num * 86400),
+        _ => None,
+    }
+}
+
+fn mute_help() -> String {
+    String::from(
+        "Mute a user from sending messages to the bridge. Duration format: 5m, 1h, 1d (default 5m).",
+    )
+}
+
+/// Mute a Discord user from sending Discord → Minecraft bridge messages.
+///
+/// Owner or admin only.  The muted user's messages will still appear in Discord
+/// but will not be relayed to the Minecraft server.  Use `/unmute` to reverse.
+#[poise::command(slash_command, prefix_command, help_text_fn = mute_help, check = "is_owner_or_admin")]
+pub async fn mute(
+    ctx: Context<'_>,
+    #[description = "Discord user to mute"] user: serenity::User,
+    #[description = "Duration (e.g. 5m, 1h, 1d) — default 5m"] duration: Option<String>,
+) -> Result<(), BotError> {
+    let target_id = user.id.get();
+    let duration_str = duration.as_deref().unwrap_or("5m");
+    tracing::info!(
+        user = %ctx.author().name,
+        target = %user.name,
+        target_id = %target_id,
+        duration = %duration_str,
+        "command /mute executed"
+    );
+
+    let secs = parse_duration(duration_str).unwrap_or_else(|| {
+        tracing::warn!(input = %duration_str, "invalid duration format, falling back to 5m");
+        300
+    });
+
+    ctx.data().storage.set_muted(target_id, secs).await?;
+
+    let duration_display = if secs == 0 {
+        "permanently".to_string()
+    } else {
+        let minutes = secs / 60;
+        let hours = minutes / 60;
+        if hours > 0 && minutes.is_multiple_of(60) {
+            format!("{hours}h")
+        } else if minutes > 0 {
+            format!("{minutes}m")
+        } else {
+            format!("{secs}s")
+        }
+    };
+
+    tracing::info!(
+        target = %user.name,
+        target_id = %target_id,
+        duration = %duration_display,
+        "mute applied"
+    );
+    ctx.say(format!(
+        "🔇 **{muted}** is muted from the bridge for **{duration_display}**.",
+        muted = user.name,
+        duration_display = duration_display,
+    ))
+    .await?;
+
+    Ok(())
+}
+
+fn unmute_help() -> String {
+    String::from("Unmute a user who was previously muted from the bridge.")
+}
+
+/// Unmute a Discord user, re-enabling their Discord → Minecraft bridge messages.
+///
+/// Owner or admin only.
+#[poise::command(slash_command, prefix_command, help_text_fn = unmute_help, check = "is_owner_or_admin")]
+pub async fn unmute(
+    ctx: Context<'_>,
+    #[description = "Discord user to unmute"] user: serenity::User,
+) -> Result<(), BotError> {
+    let target_id = user.id.get();
+    tracing::info!(
+        user = %ctx.author().name,
+        target = %user.name,
+        target_id = %target_id,
+        "command /unmute executed"
+    );
+
+    ctx.data().storage.unmute_user(target_id).await?;
+
+    tracing::info!(
+        target = %user.name,
+        target_id = %target_id,
+        "unmute applied"
+    );
+    ctx.say(format!(
+        "🔊 **{unmuted}** is no longer muted from the bridge.",
+        unmuted = user.name,
+    ))
+    .await?;
+
     Ok(())
 }
 

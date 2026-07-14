@@ -184,9 +184,10 @@ pub async fn start_bot(
     let pv_for_forward = Arc::clone(&pending_verifications);
     let pv_for_cleanup = Arc::clone(&pending_verifications);
 
-    let mc_status_client = McClient::new()
-        .with_timeout(Duration::from_secs(5))
-        .with_max_parallel(10);
+    let mc_status_client = McClient::builder()
+        .timeout(Duration::from_secs(5))
+        .max_parallel(10)
+        .build();
 
     let mut owners = HashSet::new();
     owners.insert(serenity::UserId::new(params.owner_id));
@@ -205,11 +206,14 @@ pub async fn start_bot(
                 commands::playtime(),
                 commands::leaderboard(),
                 commands::connect(),
+                commands::connect_admin(),
                 commands::disconnect(),
                 commands::unsub(),
                 commands::sub(),
                 commands::mutemention(),
                 commands::unmutemention(),
+                commands::mute(),
+                commands::unmute(),
                 commands::privacy(),
                 commands::help(),
             ],
@@ -614,6 +618,16 @@ async fn event_handler(
                         );
                         return Ok(());
                     }
+                }
+
+                // Check if the user is muted from the bridge
+                if data.storage.is_muted(author_id).await.is_some() {
+                    tracing::info!(
+                        user = %new_message.author.name,
+                        author_id,
+                        "dc→mc: filtered — user is muted from bridge",
+                    );
+                    return Ok(());
                 }
 
                 let is_silent = is_silent_message_prefix(&new_message.content)

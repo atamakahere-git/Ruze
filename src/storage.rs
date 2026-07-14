@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +40,11 @@ const JOIN_LEAVE_OPTOUT: TableDefinition<u64, bool> = TableDefinition::new("join
 
 /// Set of Discord user IDs who muted cross-chat mentions.
 const MUTE_MENTION: TableDefinition<u64, bool> = TableDefinition::new("mute_mention");
+
+/// Discord user IDs who are muted from sending Discord→MC bridge messages.
+///
+/// Key: `discord_id`. Value: expiry timestamp in seconds (0 = permanent).
+const MUTED_USERS: TableDefinition<u64, u64> = TableDefinition::new("muted_users");
 
 /// Key-value settings table (e.g. `privacy_enabled`).
 const SETTINGS: TableDefinition<&str, bool> = TableDefinition::new("settings");
@@ -160,6 +165,9 @@ pub struct Storage {
     join_leave_optout: Arc<RwLock<HashSet<u64>>>,
     /// Discord user IDs that muted cross-chat mentions.
     mute_mention: Arc<RwLock<HashSet<u64>>>,
+    /// Discord user IDs muted from sending to bridge (`discord_id` → `expiry_ts`).
+    /// 0 = permanent mute.
+    muted_users: Arc<RwLock<HashMap<u64, u64>>>,
     /// Global privacy feature toggle (admin-controlled).
     privacy_enabled: Arc<RwLock<bool>>,
 }
@@ -186,6 +194,7 @@ impl Storage {
         let (mc_usernames, discord_ids) = load_account_mappings(&db);
         let join_leave = load_optout_set(&db, JOIN_LEAVE_OPTOUT);
         let mute = load_optout_set(&db, MUTE_MENTION);
+        let muted = load_muted_users(&db);
         let privacy = load_privacy_enabled(&db);
 
         Ok(Self {
@@ -194,6 +203,7 @@ impl Storage {
             account_cache: Arc::new(RwLock::new((mc_usernames, discord_ids))),
             join_leave_optout: Arc::new(RwLock::new(join_leave)),
             mute_mention: Arc::new(RwLock::new(mute)),
+            muted_users: Arc::new(RwLock::new(muted)),
             privacy_enabled: Arc::new(RwLock::new(privacy)),
         })
     }
@@ -658,6 +668,81 @@ impl Storage {
         self.mute_mention.read().await.contains(&discord_id)
     }
 
+    /// Check whether a Discord user is currently muted from sending bridge messages.
+    ///
+    /// In-memory only — checks expiry timestamp, auto-cleans expired entries.
+    /// Returns `None` if not muted, `Some(0)` if permanently muted, `Some(ts)` with
+    /// the expiry timestamp.
+    pub async fn is_muted(&self, discord_id: u64) -> Option<u64> {
+        let mut map = self.muted_users.write().await;
+        let expiry = *map.get(&discord_id)?;
+        if expiry == 0 {
+            return Some(0);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now >= expiry {
+            // Auto-cleanup expired mute from cache and redb
+            map.remove(&discord_id);
+            let db = Arc::clone(&self.db);
+            let _ = tokio::task::spawn_blocking(move || remove_muted_user(&db, discord_id)).await;
+            return None;
+        }
+        Some(expiry)
+    }
+
+    /// Mute a Discord user from sending bridge messages for a given duration.
+    ///
+    /// `duration_secs` of 0 means permanent. Writes to both in-memory and redb.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on persistence failure.
+    pub async fn set_muted(&self, discord_id: u64, duration_secs: u64) -> Result<(), StorageError> {
+        let expiry_ts = if duration_secs == 0 {
+            0
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            now + duration_secs
+        };
+
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || write_muted_user(&db, discord_id, expiry_ts))
+            .await
+            .map_err(|e| StorageError::BlockingPanic(e.to_string()))??;
+
+        {
+            let mut map = self.muted_users.write().await;
+            map.insert(discord_id, expiry_ts);
+        }
+
+        Ok(())
+    }
+
+    /// Unmute a Discord user, removing them from the bridge mute list.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` on persistence failure.
+    pub async fn unmute_user(&self, discord_id: u64) -> Result<(), StorageError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || remove_muted_user(&db, discord_id))
+            .await
+            .map_err(|e| StorageError::BlockingPanic(e.to_string()))??;
+
+        {
+            let mut map = self.muted_users.write().await;
+            map.remove(&discord_id);
+        }
+
+        Ok(())
+    }
+
     /// Reverse-resolve a UUID to a username.
     ///
     /// # Errors
@@ -813,6 +898,50 @@ fn write_privacy_setting(db: &Database, enabled: bool) -> Result<(), StorageErro
     {
         let mut table = wtxn.open_table(SETTINGS)?;
         table.insert(PRIVACY_ENABLED_KEY, enabled)?;
+    }
+    wtxn.commit()?;
+    Ok(())
+}
+
+fn load_muted_users(db: &Database) -> HashMap<u64, u64> {
+    let mut map = HashMap::new();
+
+    let Ok(rtxn) = db.begin_read() else {
+        return map;
+    };
+
+    let Ok(table) = rtxn.open_table(MUTED_USERS) else {
+        return map;
+    };
+
+    if let Ok(iter) = table.iter() {
+        for item in iter.flatten() {
+            map.insert(item.0.value(), item.1.value());
+        }
+    }
+
+    map
+}
+
+fn write_muted_user(db: &Database, discord_id: u64, expiry_ts: u64) -> Result<(), StorageError> {
+    let wtxn = db.begin_write()?;
+    {
+        let mut table = wtxn.open_table(MUTED_USERS)?;
+        if expiry_ts == 0 {
+            table.insert(discord_id, 0)?;
+        } else {
+            table.insert(discord_id, expiry_ts)?;
+        }
+    }
+    wtxn.commit()?;
+    Ok(())
+}
+
+fn remove_muted_user(db: &Database, discord_id: u64) -> Result<(), StorageError> {
+    let wtxn = db.begin_write()?;
+    {
+        let mut table = wtxn.open_table(MUTED_USERS)?;
+        table.remove(discord_id)?;
     }
     wtxn.commit()?;
     Ok(())
@@ -1024,6 +1153,7 @@ fn open_test_storage(path: &Path) -> Storage {
     let join_leave = load_optout_set(&db, JOIN_LEAVE_OPTOUT);
     let mute = load_optout_set(&db, MUTE_MENTION);
     let privacy = load_privacy_enabled(&db);
+    let muted = load_muted_users(&db);
 
     Storage {
         db: Arc::new(db),
@@ -1031,6 +1161,7 @@ fn open_test_storage(path: &Path) -> Storage {
         account_cache: Arc::new(RwLock::new((mc_usernames, discord_ids))),
         join_leave_optout: Arc::new(RwLock::new(join_leave)),
         mute_mention: Arc::new(RwLock::new(mute)),
+        muted_users: Arc::new(RwLock::new(muted)),
         privacy_enabled: Arc::new(RwLock::new(privacy)),
     }
 }
@@ -1123,5 +1254,75 @@ mod tests {
 
         assert!(path.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn muted_user_not_muted_by_default() {
+        let path = temp_db_path("muted_default");
+        let _ = std::fs::remove_file(&path);
+        let storage = open_test_storage(&path);
+
+        let result = storage.is_muted(42).await;
+        assert!(result.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn mute_user_permanent() {
+        let path = temp_db_path("muted_perm");
+        let _ = std::fs::remove_file(&path);
+        let storage = open_test_storage(&path);
+
+        storage.set_muted(42, 0).await.expect("mute failed");
+        let result = storage.is_muted(42).await;
+        assert_eq!(result, Some(0));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn mute_user_temporary() {
+        let path = temp_db_path("muted_temp");
+        let _ = std::fs::remove_file(&path);
+        let storage = open_test_storage(&path);
+
+        storage.set_muted(42, 60).await.expect("mute failed");
+        let result = storage.is_muted(42).await;
+        assert!(result.is_some_and(|ts| ts > 0));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn unmute_user() {
+        let path = temp_db_path("muted_unmute");
+        let _ = std::fs::remove_file(&path);
+        let storage = open_test_storage(&path);
+
+        storage.set_muted(42, 0).await.expect("mute failed");
+        assert!(storage.is_muted(42).await.is_some());
+
+        storage.unmute_user(42).await.expect("unmute failed");
+        let result = storage.is_muted(42).await;
+        assert!(result.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn mute_persists_across_storage_opens() {
+        let path = temp_db_path("muted_persist");
+        let _ = std::fs::remove_file(&path);
+        {
+            let storage = open_test_storage(&path);
+            storage.set_muted(42, 0).await.expect("mute failed");
+        }
+        {
+            let storage = open_test_storage(&path);
+            let result = storage.is_muted(42).await;
+            assert_eq!(result, Some(0));
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

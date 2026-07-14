@@ -24,7 +24,7 @@ async fn main() -> Result<(), bot::BotError> {
         )
         .init();
 
-    tracing::info!("starting Ruze bridge...");
+    tracing::info!("starting VVV bridge...");
 
     let config =
         consts::Config::load().inspect_err(|e| tracing::error!("configuration error: {e}"))?;

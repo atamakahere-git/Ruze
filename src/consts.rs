@@ -13,10 +13,10 @@ fn default_mc_server_address() -> String {
 /// Central application configuration.
 ///
 /// Values are resolved from (lowest to highest priority):
-/// 1. `/etc/ruze.toml` — system-wide defaults
-/// 2. `$XDG_CONFIG_HOME/ruze.toml` — per-user config (falls back to `~/.config/ruze.toml`)
-/// 3. `$HOME/.ruze.toml` — per-user home-directory override
-/// 4. Environment variables (`RUZE_*` prefix, with deprecated old-name fallback)
+/// 1. `/etc/vvv.toml` — system-wide defaults
+/// 2. `$XDG_CONFIG_HOME/vvv.toml` — per-user config (falls back to `~/.config/vvv.toml`)
+/// 3. `$HOME/.vvv.toml` — per-user home-directory override
+/// 4. Environment variables (`VVV_*` prefix, with deprecated old-name fallback)
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub struct Config {
@@ -73,8 +73,8 @@ pub struct LogConfig {
 pub struct StorageConfig {
     /// Optional override for the redb database file path.
     ///
-    /// When unset, the database is created at `$XDG_STATE_HOME/ruze/ruze.redb`
-    /// (falling back to `~/.local/state/ruze/ruze.redb`).
+    /// When unset, the database is created at `$XDG_STATE_HOME/vvv/vvv.redb`
+    /// (falling back to `~/.local/state/vvv/vvv.redb`).
     #[serde(default)]
     pub database_path: Option<String>,
 }
@@ -139,9 +139,9 @@ impl Config {
         let mut config = Self::empty();
 
         for (path, desc) in [
-            ("/etc/ruze.toml", "global system config"),
+            ("/etc/vvv.toml", "global system config"),
             (&xdg_config_path(), "XDG config"),
-            (&home_ruze_path(), "home config"),
+            (&home_vvv_path(), "home config"),
         ] {
             match Self::merge_file(&mut config, path) {
                 Ok(Some(())) => tracing::debug!(%path, "merged {desc}"),
@@ -244,63 +244,63 @@ impl Config {
     }
 
     fn overlay_env(config: &mut Self) {
-        // New env vars (RUZE_ prefix) — highest priority
-        if let Ok(v) = std::env::var("RUZE_DISCORD_TOKEN") {
+        // New env vars (VVV_ prefix) — highest priority
+        if let Ok(v) = std::env::var("VVV_DISCORD_TOKEN") {
             config.discord.token = v;
         } else if let Ok(v) = std::env::var("DISCORD_TOKEN") {
-            tracing::warn!("DISCORD_TOKEN is deprecated; use RUZE_DISCORD_TOKEN");
+            tracing::warn!("DISCORD_TOKEN is deprecated; use VVV_DISCORD_TOKEN");
             config.discord.token = v;
         }
 
-        if let Ok(v) = std::env::var("RUZE_LOG_PATH") {
+        if let Ok(v) = std::env::var("VVV_LOG_PATH") {
             config.log.path = v;
         } else if let Ok(v) = std::env::var("LOG_PATH") {
-            tracing::warn!("LOG_PATH is deprecated; use RUZE_LOG_PATH");
+            tracing::warn!("LOG_PATH is deprecated; use VVV_LOG_PATH");
             config.log.path = v;
         }
 
-        if let Ok(v) = std::env::var("RUZE_RCON_ADDRESS") {
+        if let Ok(v) = std::env::var("VVV_RCON_ADDRESS") {
             config.rcon.address = v;
         } else if let Ok(v) = std::env::var("RCON_SERVER_ADDRESS") {
-            tracing::warn!("RCON_SERVER_ADDRESS is deprecated; use RUZE_RCON_ADDRESS");
+            tracing::warn!("RCON_SERVER_ADDRESS is deprecated; use VVV_RCON_ADDRESS");
             config.rcon.address = v;
         }
 
-        if let Ok(v) = std::env::var("RUZE_RCON_PASSWORD") {
+        if let Ok(v) = std::env::var("VVV_RCON_PASSWORD") {
             config.rcon.password = v;
         } else if let Ok(v) = std::env::var("RCON_PASSWORD") {
-            tracing::warn!("RCON_PASSWORD is deprecated; use RUZE_RCON_PASSWORD");
+            tracing::warn!("RCON_PASSWORD is deprecated; use VVV_RCON_PASSWORD");
             config.rcon.password = v;
         }
 
-        if let Ok(v) = std::env::var("RUZE_MC_SERVER_ADDRESS") {
+        if let Ok(v) = std::env::var("VVV_MC_SERVER_ADDRESS") {
             config.minecraft.server_address = v;
         } else if let Ok(v) = std::env::var("MC_SERVER_QUERY_ADDRESS") {
-            tracing::warn!("MC_SERVER_QUERY_ADDRESS is deprecated; use RUZE_MC_SERVER_ADDRESS");
+            tracing::warn!("MC_SERVER_QUERY_ADDRESS is deprecated; use VVV_MC_SERVER_ADDRESS");
             config.minecraft.server_address = v;
         }
 
-        if let Ok(v) = std::env::var("RUZE_OWNER_ID") {
+        if let Ok(v) = std::env::var("VVV_OWNER_ID") {
             if let Ok(id) = v.parse::<u64>() {
                 config.bot.owner_id = id;
             } else {
-                tracing::error!("RUZE_OWNER_ID is not a valid u64: {v}");
+                tracing::error!("VVV_OWNER_ID is not a valid u64: {v}");
             }
         }
 
-        if let Ok(v) = std::env::var("RUZE_GUILD_ID") {
+        if let Ok(v) = std::env::var("VVV_GUILD_ID") {
             if let Ok(id) = v.parse::<u64>() {
                 config.bot.guild_id = Some(id);
             } else {
-                tracing::error!("RUZE_GUILD_ID is not a valid u64: {v}");
+                tracing::error!("VVV_GUILD_ID is not a valid u64: {v}");
             }
         }
 
-        if let Ok(v) = std::env::var("RUZE_DATABASE_PATH") {
+        if let Ok(v) = std::env::var("VVV_DATABASE_PATH") {
             config.storage.database_path = Some(v);
         }
 
-        if let Ok(v) = std::env::var("RUZE_STATS_TIMEZONE") {
+        if let Ok(v) = std::env::var("VVV_STATS_TIMEZONE") {
             config.stats.timezone = v;
         }
     }
@@ -308,19 +308,19 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.discord.token.is_empty() {
             return Err(ConfigError::MissingField(
-                "discord.token / RUZE_DISCORD_TOKEN",
+                "discord.token / VVV_DISCORD_TOKEN",
             ));
         }
         if self.log.path.is_empty() {
-            return Err(ConfigError::MissingField("log.path / RUZE_LOG_PATH"));
+            return Err(ConfigError::MissingField("log.path / VVV_LOG_PATH"));
         }
         if self.rcon.password.is_empty() {
             return Err(ConfigError::MissingField(
-                "rcon.password / RUZE_RCON_PASSWORD",
+                "rcon.password / VVV_RCON_PASSWORD",
             ));
         }
         if self.bot.owner_id == 0 {
-            return Err(ConfigError::MissingField("bot.owner_id / RUZE_OWNER_ID"));
+            return Err(ConfigError::MissingField("bot.owner_id / VVV_OWNER_ID"));
         }
         Ok(())
     }
@@ -341,24 +341,24 @@ fn xdg_state_home() -> PathBuf {
 
 fn xdg_config_path() -> String {
     xdg_config_home()
-        .join("ruze.toml")
+        .join("vvv.toml")
         .to_string_lossy()
         .to_string()
 }
 
-fn home_ruze_path() -> String {
-    home_dir().join(".ruze.toml").to_string_lossy().to_string()
+fn home_vvv_path() -> String {
+    home_dir().join(".vvv.toml").to_string_lossy().to_string()
 }
 
-/// Default redb database location: `$XDG_STATE_HOME/ruze/ruze.redb`.
+/// Default redb database location: `$XDG_STATE_HOME/vvv/vvv.redb`.
 pub fn default_db_path() -> PathBuf {
-    xdg_state_home().join("ruze").join("ruze.redb")
+    xdg_state_home().join("vvv").join("vvv.redb")
 }
 
 /// Resolve the redb database path from (highest → lowest priority):
-/// 1. `RUZE_DATABASE_PATH` env var (already overlaid onto `config.storage.database_path`)
+/// 1. `VVV_DATABASE_PATH` env var (already overlaid onto `config.storage.database_path`)
 /// 2. `[storage] database_path` from config
-/// 3. `$XDG_STATE_HOME/ruze/ruze.redb` default
+/// 3. `$XDG_STATE_HOME/vvv/vvv.redb` default
 pub fn resolve_db_path(config: &Config) -> PathBuf {
     config
         .storage

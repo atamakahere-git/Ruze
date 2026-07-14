@@ -223,8 +223,7 @@ pub async fn start_bot(
                     Duration::from_hours(1),
                 ))),
                 additional_prefixes: vec![
-                    poise::Prefix::Literal("hey reze,"),
-                    poise::Prefix::Literal("hey reze"),
+                    poise::Prefix::Literal("vvv"),
                 ],
                 ..Default::default()
             },
@@ -548,9 +547,9 @@ async fn event_handler(
             );
 
             let welcome_embed = serenity::CreateEmbed::new()
-                .title("💥 A New Target Approaches! 💥")
+                .title("🏘️ A New Traveler Arrives! 🏘️")
                 .description(format!(
-                    "Welcome to the server, {}! Let's hope things don't get too... explosive. 🤫",
+                    "Welcome to the server, {}! The Viaduct awaits your tales. 📖",
                     new_member.mention()
                 ))
                 .color(0x9b5_9b6)

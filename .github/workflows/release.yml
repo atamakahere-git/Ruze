@@ -50,13 +50,13 @@ jobs:
       - run: cargo build --release --target ${{ matrix.target }}
 
       - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/meow
+        run: strip target/${{ matrix.target }}/release/vvv
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: meow-linux-${{ matrix.suffix }}
-          path: target/${{ matrix.target }}/release/meow
+          name: vvv-linux-${{ matrix.suffix }}
+          path: target/${{ matrix.target }}/release/vvv
 
   release:
     name: Create GitHub Release
@@ -68,15 +68,15 @@ jobs:
           path: artifacts
 
       - run: |
-          cp artifacts/meow-linux-amd64/meow    meow-linux-amd64
-          cp artifacts/meow-linux-arm64/meow    meow-linux-arm64
-          chmod +x meow-linux-*
-          sha256sum meow-linux-* > checksums.txt
+          cp artifacts/vvv-linux-amd64/vvv    vvv-linux-amd64
+          cp artifacts/vvv-linux-arm64/vvv    vvv-linux-arm64
+          chmod +x vvv-linux-*
+          sha256sum vvv-linux-* > checksums.txt
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            meow-linux-amd64
-            meow-linux-arm64
+            vvv-linux-amd64
+            vvv-linux-arm64
             checksums.txt
           generate_release_notes: true

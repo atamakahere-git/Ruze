@@ -33,7 +33,8 @@ fn start_bridge_help() -> String {
 #[poise::command(slash_command, prefix_command, help_text_fn = ping_help)]
 pub async fn ping(ctx: Context<'_>) -> Result<(), BotError> {
     tracing::info!(user = %ctx.author().name, "command /ping executed");
-    ctx.say("UwU Helloo!").await?;
+    ctx.say("Villager's Verse Viaduct is online! ~help for commands.")
+        .await?;
     Ok(())
 }
 
@@ -1077,7 +1078,7 @@ pub async fn help(ctx: Context<'_>, command_name: Option<String>) -> Result<(), 
         ));
     } else {
         embed = embed.footer(serenity::CreateEmbedFooter::new(
-            "Use ~command or \"hey reze, command\" to use any of these commands",
+            "Use ~command to use any of these commands",
         ));
     }
 

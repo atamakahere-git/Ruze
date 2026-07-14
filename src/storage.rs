@@ -1171,7 +1171,7 @@ mod tests {
     use super::*;
 
     fn temp_db_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("ruze_test_{name}_{}.redb", std::process::id()))
+        std::env::temp_dir().join(format!("vvv_test_{name}_{}.redb", std::process::id()))
     }
 
     #[tokio::test]
@@ -1244,8 +1244,8 @@ mod tests {
 
     #[tokio::test]
     async fn open_creates_parent_directories() {
-        let dir = std::env::temp_dir().join(format!("ruze_test_dir_{}", std::process::id()));
-        let path = dir.join("sub").join("ruze.redb");
+        let dir = std::env::temp_dir().join(format!("vvv_test_dir_{}", std::process::id()));
+        let path = dir.join("sub").join("vvv.redb");
         let _ = std::fs::remove_dir_all(&dir);
 
         let storage = open_test_storage(&path);

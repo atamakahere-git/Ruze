@@ -307,8 +307,12 @@ fn try_chat(line: &str) -> Option<MinecraftEvent> {
     let username = captures.name("username")?.as_str().to_owned();
     let message = captures.name("message")?.as_str().to_owned();
 
-    if message.len() > 11 && message[..11].eq_ignore_ascii_case("@s CONFIRM-") {
-        tracing::info!(%username, code = %message[11..].split_whitespace().next().unwrap_or("?"), "CONFIRM code detected in chat — bypassing silent filter");
+    if message.len() >= 11
+        && message.is_char_boundary(11)
+        && message[..11].eq_ignore_ascii_case("@s CONFIRM-")
+    {
+        let code = message[11..].split_whitespace().next().unwrap_or("?");
+        tracing::info!(%username, code, "CONFIRM code detected in chat — bypassing silent filter");
         return Some(MinecraftEvent::Chat { username, message });
     }
 

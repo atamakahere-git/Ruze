@@ -20,6 +20,8 @@ pub enum BotError {
     Rcon(#[from] crate::rcon::RconError),
     #[error("storage error: {0}")]
     Storage(#[from] crate::storage::StorageError),
+    #[error("player data error: {0}")]
+    PlayerData(#[from] crate::playerdata::PlayerDataError),
 }
 
 impl From<poise::serenity_prelude::Error> for BotError {

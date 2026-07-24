@@ -8,6 +8,12 @@ use bot::types::{BotParams, FromDiscordEvent, FromMinecraftEvent};
 mod bot;
 mod consts;
 mod log_parser;
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+mod playerdata;
 mod rcon;
 mod stats;
 mod storage;
@@ -106,6 +112,7 @@ async fn main() -> Result<(), bot::BotError> {
         dc_event_tx,
         shared_rcon,
         storage,
+        playerdata::world_dir_from_config(config.minecraft.world_directory.as_ref()),
     )
     .await?;
 

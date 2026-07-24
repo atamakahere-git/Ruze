@@ -1004,6 +1004,73 @@ pub async fn is_owner_or_admin(ctx: Context<'_>) -> Result<bool, BotError> {
     Ok(false)
 }
 
+/// View player profile: stats, advancements, and inventory dashboard.
+#[poise::command(slash_command, prefix_command)]
+pub async fn profile(
+    ctx: Context<'_>,
+    #[description = "Minecraft username (leave empty for your account)"] username: Option<String>,
+) -> Result<(), BotError> {
+    tracing::info!(
+        user = %ctx.author().name,
+        target = ?username,
+        "command /profile executed"
+    );
+
+    let resolved_username = if let Some(name) = username {
+        name
+    } else {
+        let Some(mc_name) = ctx
+            .data()
+            .storage
+            .get_mc_from_dc(ctx.author().id.get())
+            .await
+        else {
+            ctx.say("❌ No Minecraft account linked. Use `/connect <username>` to link or provide a username: `/profile <username>`").await?;
+            return Ok(());
+        };
+        mc_name
+    };
+
+    let uuid = ctx
+        .data()
+        .storage
+        .resolve_uuid(resolved_username.to_lowercase())
+        .await
+        .ok()
+        .flatten();
+
+    let Some(uuid) = uuid else {
+        ctx.say(format!(
+            "❌ UUID not found for **{resolved_username}** in the database. The player may not have joined the server yet."
+        ))
+        .await?;
+        return Ok(());
+    };
+
+    let Some(ref world_dir) = ctx.data().world_directory else {
+        ctx.say("❌ World directory not configured. Set `minecraft.world_directory` in config or `VVV_MC_WORLD_DIRECTORY` env var.").await?;
+        return Ok(());
+    };
+
+    ctx.defer()
+        .await
+        .inspect_err(|e| tracing::warn!("failed to defer interaction: {e}"))
+        .ok();
+
+    let profile = crate::playerdata::load_player_profile(world_dir, &uuid, &resolved_username);
+
+    let embeds = crate::playerdata::build_profile_embeds(&profile);
+
+    let mut reply = poise::CreateReply::default();
+    for embed in embeds {
+        reply = reply.embed(embed);
+    }
+
+    ctx.send(reply).await?;
+
+    Ok(())
+}
+
 /// Show all available commands or get detailed help for a specific one.
 #[poise::command(slash_command, prefix_command)]
 pub async fn help(ctx: Context<'_>, command_name: Option<String>) -> Result<(), BotError> {

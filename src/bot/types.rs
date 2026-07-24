@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -47,6 +48,7 @@ pub struct Data {
     pub rcon_client: Arc<ReconnectingRcon>,
     pub mc_server_address: url::Url,
     pub pending_verifications: Arc<Mutex<HashMap<String, PendingVerification>>>,
+    pub world_directory: Option<PathBuf>,
 }
 
 impl MinecraftEvent {

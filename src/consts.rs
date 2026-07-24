@@ -52,6 +52,10 @@ pub struct RconConfig {
 pub struct MinecraftConfig {
     #[serde(default = "default_mc_server_address")]
     pub server_address: String,
+    /// Path to the Minecraft world directory (contains playerdata/, stats/, advancements/).
+    /// Optional — the `~profile` command requires this to load player data.
+    #[serde(default)]
+    pub world_directory: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +172,7 @@ impl Config {
             },
             minecraft: MinecraftConfig {
                 server_address: default_mc_server_address(),
+                world_directory: None,
             },
             bot: BotConfig {
                 owner_id: 0,
@@ -225,6 +230,12 @@ impl Config {
                 .minecraft
                 .server_address
                 .clone_from(&source.minecraft.server_address);
+        }
+        if source.minecraft.world_directory.is_some() {
+            target
+                .minecraft
+                .world_directory
+                .clone_from(&source.minecraft.world_directory);
         }
         if source.bot.owner_id != 0 {
             target.bot.owner_id = source.bot.owner_id;
@@ -298,6 +309,9 @@ impl Config {
 
         if let Ok(v) = std::env::var("VVV_DATABASE_PATH") {
             config.storage.database_path = Some(v);
+        }
+        if let Ok(v) = std::env::var("VVV_MC_WORLD_DIRECTORY") {
+            config.minecraft.world_directory = Some(v);
         }
 
         if let Ok(v) = std::env::var("VVV_STATS_TIMEZONE") {

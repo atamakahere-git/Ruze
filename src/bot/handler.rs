@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -165,6 +166,7 @@ pub async fn start_bot(
     dc_event_tx: Sender<FromDiscordEvent>,
     rcon_client: Arc<ReconnectingRcon>,
     storage: Arc<Storage>,
+    world_directory: Option<PathBuf>,
 ) -> Result<(), BotError> {
     let intents =
         serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT;
@@ -215,6 +217,7 @@ pub async fn start_bot(
                 commands::mute(),
                 commands::unmute(),
                 commands::privacy(),
+                commands::profile(),
                 commands::help(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
@@ -250,6 +253,7 @@ pub async fn start_bot(
                     rcon_client,
                     mc_server_address: addr,
                     pending_verifications: pv_for_data.clone(),
+                    world_directory: world_directory.clone(),
                 })
             })
         })
